@@ -103,6 +103,60 @@ class BeaverEnvelope:
 
         # Code-specific info
         elif envelope_type == "code":
+            # Check if this is a ComputationRequest
+            obj_type = self.manifest.get("type", "")
+            if obj_type == "ComputationRequest":
+                # Show computation inputs
+                lines.append("")
+                lines.append("Inputs:")
+                # Try to load and inspect the computation
+                try:
+                    from .runtime import unpack
+                    comp_req = unpack(self, strict=False)
+
+                    # Get context if we can (walk up frame stack)
+                    context = None
+                    import inspect
+                    current = inspect.currentframe()
+                    while current and current.f_back and context is None:
+                        current = current.f_back
+                        for scope in [current.f_locals, current.f_globals]:
+                            for var_name, var_obj in scope.items():
+                                if (hasattr(var_obj, 'remote_vars') and
+                                    hasattr(var_obj, 'user') and
+                                    hasattr(var_obj, 'inbox_path')):
+                                    context = var_obj
+                                    break
+                            if context:
+                                break
+
+                    for i, arg in enumerate(comp_req.args):
+                        if isinstance(arg, dict) and arg.get("_beaver_remote_var"):
+                            local_match = ""
+                            data_preview = ""
+                            if context and arg['owner'] == context.user:
+                                local_match = " [LOCAL]"
+                                # Try to get the actual value
+                                for var in context.remote_vars.vars.values():
+                                    if var.var_id == arg['var_id']:
+                                        if var._stored_value is not None:
+                                            val_repr = repr(var._stored_value)
+                                            if len(val_repr) > 40:
+                                                val_repr = val_repr[:37] + "..."
+                                            data_preview = f" = {val_repr}"
+                                        break
+                            lines.append(
+                                f"  [{i}] RemoteVar('{arg['name']}') "
+                                f"from {arg['owner']}{local_match}{data_preview}"
+                            )
+                        else:
+                            arg_repr = repr(arg)
+                            if len(arg_repr) > 60:
+                                arg_repr = arg_repr[:57] + "..."
+                            lines.append(f"  [{i}] {arg_repr}")
+                except Exception:
+                    lines.append("  (could not load inputs)")
+
             # Add signature info if available
             signature = self.manifest.get("signature")
             if signature:

@@ -1,5 +1,12 @@
 """Lightweight notebook-to-notebook ferry for Python objects using Fory."""
 
+from .computation import (
+    ComputationRequest,
+    ComputationResult,
+    RemoteComputationPointer,
+    StagingArea,
+    execute_remote_computation,
+)
 from .envelope import BeaverEnvelope
 from .policy import (
     BeaverPolicy,
@@ -7,6 +14,7 @@ from .policy import (
     STRICT_POLICY,
     VERBOSE_POLICY,
 )
+from .remote_vars import RemoteVar, RemoteVarRegistry, RemoteVarView
 from .runtime import (
     BeaverContext,
     SendResult,
@@ -32,11 +40,19 @@ __all__ = [
     "BeaverEnvelope",
     "BeaverContext",
     "BeaverPolicy",
+    "ComputationRequest",
+    "ComputationResult",
     "PERMISSIVE_POLICY",
     "VERBOSE_POLICY",
     "STRICT_POLICY",
+    "RemoteComputationPointer",
+    "RemoteVar",
+    "RemoteVarRegistry",
+    "RemoteVarView",
+    "StagingArea",
     "SendResult",
     "connect",
+    "execute_remote_computation",
     "export",
     "find_by_id",
     "load_by_id",

@@ -541,6 +541,7 @@ def export(
     requirements: Optional[Iterable[str]] = None,
     strict: bool = False,
     policy=None,
+    context=None,
 ):
     """
     Decorator that adds .bind() and .send() to a callable.
@@ -552,6 +553,41 @@ def export(
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            # Check if any arguments are RemoteVarPointers
+            from .remote_vars import RemoteVarPointer
+            from .computation import RemoteComputationPointer
+
+            has_remote_pointer = False
+            destination_user = None
+
+            # Check args
+            for arg in args:
+                if isinstance(arg, RemoteVarPointer):
+                    has_remote_pointer = True
+                    destination_user = arg.remote_var.owner
+                    break
+
+            # Check kwargs
+            if not has_remote_pointer:
+                for arg in kwargs.values():
+                    if isinstance(arg, RemoteVarPointer):
+                        has_remote_pointer = True
+                        destination_user = arg.remote_var.owner
+                        break
+
+            # If remote pointers detected, return computation pointer instead of executing
+            if has_remote_pointer:
+                comp = RemoteComputationPointer(
+                    func=func,
+                    args=args,
+                    kwargs=kwargs,
+                    destination=destination_user or "unknown",
+                    result_name=name or func.__name__,
+                    context=context,
+                )
+                return comp
+
+            # Normal execution if no remote pointers
             return func(*args, **kwargs)
 
         class BoundFunction:
@@ -633,6 +669,40 @@ def wait_for_reply(
     return None, None
 
 
+class UserRemoteVars:
+    """Helper for accessing another user's remote variables."""
+
+    def __init__(self, username: str, context):
+        self.username = username
+        self.context = context
+        self._remote_vars_view = None
+
+    @property
+    def remote_vars(self):
+        """
+        Access the remote user's published variables.
+
+        Returns:
+            RemoteVarView for browsing their vars
+        """
+        if self._remote_vars_view is None:
+            from .remote_vars import RemoteVarView
+
+            registry_path = (
+                self.context._public_dir / self.username / "remote_vars.json"
+            )
+            data_dir = self.context._base_dir / self.username
+
+            self._remote_vars_view = RemoteVarView(
+                remote_user=self.username,
+                local_user=self.context.user,
+                registry_path=registry_path,
+                data_dir=data_dir,
+                context=self.context,
+            )
+        return self._remote_vars_view
+
+
 class BeaverContext:
     """Connection helper holding identity and inbox/outbox defaults."""
 
@@ -645,6 +715,8 @@ class BeaverContext:
         biovault: Optional[str] = None,
         strict: bool = False,
         policy=None,
+        auto_load_replies: bool = True,
+        poll_interval: float = 2.0,
     ) -> None:
         self.inbox_path = Path(inbox)
         self.outbox = Path(outbox) if outbox is not None else self.inbox_path
@@ -652,6 +724,173 @@ class BeaverContext:
         self.biovault = biovault
         self.strict = strict
         self.policy = policy
+
+        # Remote vars setup
+        self._base_dir = self.inbox_path.parent.parent  # shared/
+        self._public_dir = self._base_dir / "public"
+        self._registry_path = self._public_dir / self.user / "remote_vars.json"
+        self._remote_vars_registry = None
+
+        # Staging area for remote computations
+        self._staging_area = None
+
+        # Auto-load replies setup
+        self._auto_load_enabled = False
+        self._poll_interval = poll_interval
+        self._auto_load_thread = None
+        self._stop_auto_load = False
+        self._processed_replies = set()  # Track processed envelope IDs
+
+        # Start auto-loading if enabled
+        if auto_load_replies:
+            self.start_auto_load()
+
+    @property
+    def remote_vars(self):
+        """
+        Access this user's published remote variables registry.
+
+        Returns:
+            RemoteVarRegistry for managing published vars
+        """
+        if self._remote_vars_registry is None:
+            from .remote_vars import RemoteVarRegistry
+
+            self._remote_vars_registry = RemoteVarRegistry(
+                owner=self.user, registry_path=self._registry_path
+            )
+        return self._remote_vars_registry
+
+    def peer(self, username: str):
+        """
+        Access another user's published remote variables.
+
+        Args:
+            username: The peer user whose vars to view
+
+        Returns:
+            UserRemoteVars helper object
+        """
+        return UserRemoteVars(username=username, context=self)
+
+    @property
+    def staged(self):
+        """
+        Access the staging area for remote computations.
+
+        Returns:
+            StagingArea for managing staged computations
+        """
+        if self._staging_area is None:
+            from .computation import StagingArea
+
+            self._staging_area = StagingArea(context=self)
+        return self._staging_area
+
+    def _add_staged(self, computation):
+        """Add a computation to the staging area (internal use)."""
+        self.staged.add(computation)
+
+    def send_staged(self):
+        """Send all staged computations."""
+        self.staged.send_all()
+
+    def start_auto_load(self):
+        """Start auto-loading replies in background."""
+        if self._auto_load_enabled:
+            return  # Already running
+
+        import threading
+
+        self._auto_load_enabled = True
+        self._stop_auto_load = False
+
+        def auto_load_loop():
+            """Background thread that polls for new replies."""
+            import time
+
+            while not self._stop_auto_load:
+                try:
+                    self._check_and_load_replies()
+                except Exception as e:
+                    # Silently handle errors to keep thread alive
+                    pass
+
+                time.sleep(self._poll_interval)
+
+        self._auto_load_thread = threading.Thread(
+            target=auto_load_loop, daemon=True, name=f"beaver-autoload-{self.user}"
+        )
+        self._auto_load_thread.start()
+        print(f"🔄 Auto-load replies enabled for {self.user} (polling every {self._poll_interval}s)")
+
+    def stop_auto_load(self):
+        """Stop auto-loading replies."""
+        if not self._auto_load_enabled:
+            return
+
+        self._stop_auto_load = True
+        self._auto_load_enabled = False
+        print(f"⏸️  Auto-load replies disabled for {self.user}")
+
+    def _check_and_load_replies(self):
+        """Check inbox for new replies and auto-load them."""
+        # Get all envelopes
+        envelopes = list_inbox(self.inbox_path)
+
+        # Find replies we haven't processed yet
+        for envelope in envelopes:
+            # Skip if already processed
+            if envelope.envelope_id in self._processed_replies:
+                continue
+
+            # Check if this is a reply
+            if envelope.reply_to:
+                # Mark as processed first to avoid duplicates
+                self._processed_replies.add(envelope.envelope_id)
+
+                try:
+                    # Load the reply
+                    obj = unpack(envelope, strict=self.strict, policy=self.policy)
+
+                    # First, try to update the original computation pointer
+                    from .computation import _update_computation_pointer
+
+                    updated = _update_computation_pointer(envelope.reply_to, obj)
+
+                    if updated:
+                        print(f"✨ Auto-updated computation pointer!")
+                        print(f"   Variable holding the pointer now has result")
+                        print(f"   Access with .value or just print the variable")
+                    else:
+                        # If no pointer found, inject into globals as before
+                        # Get caller's globals (walk up to find __main__ or first non-beaver module)
+                        target_globals = None
+                        frame = inspect.currentframe()
+                        while frame:
+                            frame_globals = frame.f_globals
+                            module_name = frame_globals.get("__name__", "")
+                            if module_name == "__main__" or not module_name.startswith("beaver"):
+                                target_globals = frame_globals
+                                break
+                            frame = frame.f_back
+
+                        if target_globals is None:
+                            # Fallback to main module
+                            import __main__
+                            target_globals = __main__.__dict__
+
+                        # Inject into globals with envelope name
+                        var_name = envelope.name or f"reply_{envelope.envelope_id[:8]}"
+                        target_globals[var_name] = obj
+
+                        print(f"✨ Auto-loaded reply: {var_name} = {type(obj).__name__}")
+                        print(f"   From: {envelope.sender}")
+                        print(f"   Reply to: {envelope.reply_to[:8]}...")
+
+                except Exception as e:
+                    # Don't fail the whole loop on one bad envelope
+                    print(f"⚠️  Failed to auto-load {envelope.name}: {e}")
 
     def __call__(self, func=None, **kwargs):
         """Allow @bv as a decorator; kwargs override context defaults."""
@@ -670,6 +909,7 @@ class BeaverContext:
                     requirements=kwargs.get("requirements"),
                     strict=kwargs.get("strict", self.strict),
                     policy=kwargs.get("policy", self.policy),
+                    context=self,
                 )(func)
 
                 original_send = wrapped.send
@@ -766,12 +1006,58 @@ class BeaverContext:
         """List envelopes in the context inbox."""
         return list_inbox(kwargs.get("inbox", self.inbox_path))
 
-    def inbox(self, sort_by: Optional[str] = None, reverse: bool = False, **kwargs):
-        """Return an InboxView for the current inbox with optional sorting."""
+    def inbox(
+        self,
+        sort_by: Optional[str] = "created_at",
+        reverse: bool = True,
+        newest: bool = False,
+        oldest: bool = False,
+        by_name: bool = False,
+        by_sender: bool = False,
+        by_size: bool = False,
+        by_type: bool = False,
+        **kwargs
+    ):
+        """
+        Return an InboxView for the current inbox with optional sorting.
+
+        Args:
+            sort_by: Field to sort by (default: "created_at")
+            reverse: Reverse sort order (default: True for newest first)
+            newest: Shorthand for newest first (created_at desc)
+            oldest: Shorthand for oldest first (created_at asc)
+            by_name: Sort by name alphabetically
+            by_sender: Sort by sender alphabetically
+            by_size: Sort by size (largest first)
+            by_type: Sort by type alphabetically
+
+        Returns:
+            InboxView with sorted envelopes
+        """
         inbox_path = kwargs.get("inbox", self.inbox_path)
         envelopes = list_inbox(inbox_path)
 
-        # Sort if requested
+        # Apply flag shortcuts
+        if newest:
+            sort_by = "created_at"
+            reverse = True
+        elif oldest:
+            sort_by = "created_at"
+            reverse = False
+        elif by_name:
+            sort_by = "name"
+            reverse = False
+        elif by_sender:
+            sort_by = "sender"
+            reverse = False
+        elif by_size:
+            sort_by = "size"
+            reverse = True
+        elif by_type:
+            sort_by = "type"
+            reverse = False
+
+        # Sort
         if sort_by:
             def sort_key(env):
                 if sort_by == "name":
@@ -838,11 +1124,25 @@ def connect(
     outbox: Optional[Path | str] = None,
     strict: bool = False,
     policy=None,
+    auto_load_replies: bool = True,
+    poll_interval: float = 2.0,
 ) -> BeaverContext:
     """
     Create a BeaverContext with shared defaults.
 
-    If inbox/outbox are omitted, both default to `folder`.
+    Args:
+        folder: Base directory for shared files
+        user: Username for this context
+        biovault: Optional biovault identifier
+        inbox: Inbox directory (defaults to folder/user)
+        outbox: Outbox directory (defaults to inbox)
+        strict: Enable strict mode for serialization
+        policy: Security policy for deserialization
+        auto_load_replies: Auto-load computation replies (default: True)
+        poll_interval: How often to check for replies in seconds (default: 2.0)
+
+    Returns:
+        BeaverContext with auto-loading enabled
     """
     base = Path(folder)
     user_subdir = base / user if user else base
@@ -853,4 +1153,6 @@ def connect(
         biovault=biovault,
         strict=strict,
         policy=policy,
+        auto_load_replies=auto_load_replies,
+        poll_interval=poll_interval,
     )

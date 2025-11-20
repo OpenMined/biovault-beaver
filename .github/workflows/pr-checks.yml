@@ -50,9 +50,7 @@ jobs:
           uv sync --all-extras
 
       - name: Run tests
-        run: |
-          cd python
-          uv run pytest
+        run: bash test.sh
 
   test-local:
     runs-on: ubuntu-latest

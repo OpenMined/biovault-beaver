@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import sys
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -49,9 +48,9 @@ def _update_twin_result(comp_id: str, result_value: Any):
     if comp_id in _TWIN_RESULTS:
         twin = _TWIN_RESULTS[comp_id]
         # Update the private side with the actual result
-        object.__setattr__(twin, 'private', result_value)
+        object.__setattr__(twin, "private", result_value)
         print(f"✨ Twin result auto-updated: {twin.name or twin.twin_id[:8]}...")
-        print(f"   .value now uses private (approved result)")
+        print("   .value now uses private (approved result)")
         # Remove from registry after updating
         del _TWIN_RESULTS[comp_id]
         return True
@@ -115,7 +114,7 @@ class ComputationResult:
         if isinstance(self.result, Twin):
             if self.result.has_public:
                 print(f"🧪 Approving mock/public result for: {self.var_name}")
-                print(f"   💡 Requester can continue development with mock data")
+                print("   💡 Requester can continue development with mock data")
                 return self._send_result(self.result.public)
             else:
                 raise ValueError("Twin has no public data to approve")
@@ -145,7 +144,7 @@ class ComputationResult:
             "comp_id": self.comp_id,
             "result_name": self.var_name,
             "message": message,
-            "rejected_at": _iso_now()
+            "rejected_at": _iso_now(),
         }
 
         # Send rejection back
@@ -187,10 +186,10 @@ class ComputationResult:
         # If result is a Twin, show it directly with minimal wrapper
         if isinstance(self.result, Twin):
             lines = []
-            lines.append(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             lines.append(f"ComputationResult: {self.var_name}")
             lines.append(f"  Request from: {self.sender}")
-            lines.append(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             lines.append("")
 
             # Show the Twin directly (use its __str__)
@@ -202,11 +201,12 @@ class ComputationResult:
                 lines.append(f"\n  ❌ Execution Error: {self.error}")
 
             if self.stdout and self.stdout.strip():
-                lines.append(f"\n  📤 Output captured during execution:")
-                for line in self.stdout.strip().split('\n')[:5]:  # Show first 5 lines
+                lines.append("\n  📤 Output captured during execution:")
+                for line in self.stdout.strip().split("\n")[:5]:  # Show first 5 lines
                     lines.append(f"     {line}")
-                if len(self.stdout.strip().split('\n')) > 5:
-                    lines.append(f"     ... ({len(self.stdout.strip().split('\n')) - 5} more lines)")
+                if len(self.stdout.strip().split("\n")) > 5:
+                    more_lines = len(self.stdout.strip().split("\n")) - 5
+                    lines.append(f"     ... ({more_lines} more lines)")
 
             # Show actions based on Twin state
             lines.append("")
@@ -290,10 +290,12 @@ class ComputationRequest:
             frame = frame.f_back
             # Collect all BeaverContext objects
             for scope in [frame.f_locals, frame.f_globals]:
-                for var_name, var_obj in scope.items():
-                    if (hasattr(var_obj, 'remote_vars') and
-                        hasattr(var_obj, 'user') and
-                        hasattr(var_obj, 'inbox_path')):
+                for _var_name, var_obj in scope.items():
+                    if (
+                        hasattr(var_obj, "remote_vars")
+                        and hasattr(var_obj, "user")
+                        and hasattr(var_obj, "inbox_path")
+                    ):
                         candidates.append(var_obj)
 
         # Prefer context that matches expected user, otherwise first found
@@ -320,6 +322,7 @@ class ComputationRequest:
         # Auto-detect context from caller's scope if not provided
         if context is None:
             import inspect
+
             frame = inspect.currentframe()
 
             # Try to find the expected user from remote var args
@@ -336,10 +339,12 @@ class ComputationRequest:
                 current = current.f_back
                 # Collect all BeaverContext objects
                 for scope in [current.f_locals, current.f_globals]:
-                    for var_name, var_obj in scope.items():
-                        if (hasattr(var_obj, 'remote_vars') and
-                            hasattr(var_obj, 'user') and
-                            hasattr(var_obj, 'inbox_path')):
+                    for _var_name, var_obj in scope.items():
+                        if (
+                            hasattr(var_obj, "remote_vars")
+                            and hasattr(var_obj, "user")
+                            and hasattr(var_obj, "inbox_path")
+                        ):
                             candidates.append(var_obj)
 
             # Prefer context that matches expected user, otherwise first found
@@ -368,7 +373,7 @@ class ComputationRequest:
             context=context,
         )
 
-        print(f"✓ Execution complete")
+        print("✓ Execution complete")
         if result_data["error"]:
             print(f"❌ Error: {result_data['error']}")
         else:
@@ -403,11 +408,12 @@ class ComputationRequest:
         # Only wrap in Twin if execution succeeded
         if comp_result.error is None and comp_result.result is not None:
             from .twin import Twin
+
             result_twin = Twin(
                 private=comp_result.result,
                 public=None,
                 owner=context.user if context else "unknown",
-                name=self.result_name
+                name=self.result_name,
             )
             comp_result.result = result_twin
 
@@ -432,7 +438,7 @@ class ComputationRequest:
                 if arg.has_public:
                     mock_args.append(arg.public)
                 else:
-                    raise ValueError(f"Twin argument has no public data for mock testing")
+                    raise ValueError("Twin argument has no public data for mock testing")
             else:
                 mock_args.append(arg)
 
@@ -447,7 +453,7 @@ class ComputationRequest:
                 mock_kwargs[k] = v
 
         # Execute on mock data
-        print(f"🧪 Testing on mock/public data...")
+        print("🧪 Testing on mock/public data...")
         mock_result = self.func(*mock_args, **mock_kwargs)
         print(f"✓ Mock result: {type(mock_result).__name__}")
 
@@ -456,7 +462,7 @@ class ComputationRequest:
             private=None,
             public=mock_result,
             owner=context.user if context else "unknown",
-            name=self.result_name
+            name=self.result_name,
         )
 
         # Return ComputationResult
@@ -486,22 +492,26 @@ class ComputationRequest:
             context = self._auto_detect_context()
 
         # Run mock first
-        print(f"🧪 Step 1/2: Testing on mock/public data...")
+        print("🧪 Step 1/2: Testing on mock/public data...")
         mock_comp_result = self.run_mock(context=context)
 
         # Then run on real data
-        print(f"🔒 Step 2/2: Executing on real/private data...")
+        print("🔒 Step 2/2: Executing on real/private data...")
         comp_result = self.execute(context=context)
 
         # Extract the mock data from the Twin returned by run_mock()
-        mock_data = mock_comp_result.result.public if isinstance(mock_comp_result.result, Twin) else mock_comp_result.result
+        mock_data = (
+            mock_comp_result.result.public
+            if isinstance(mock_comp_result.result, Twin)
+            else mock_comp_result.result
+        )
 
         # Create Twin with both sides
         result_twin = Twin(
             public=mock_data,
             private=comp_result.result,
             owner=context.user if context else "unknown",
-            name=self.result_name
+            name=self.result_name,
         )
 
         # Update the ComputationResult's data field to be the Twin
@@ -530,8 +540,9 @@ class ComputationRequest:
         has_data = False
         data_lines = []
 
-        for i, arg in enumerate(self.args):
+        for _i, arg in enumerate(self.args):
             from .twin import Twin
+
             if isinstance(arg, Twin) or (isinstance(arg, dict) and arg.get("_beaver_remote_var")):
                 has_data = True
 
@@ -551,22 +562,32 @@ class ComputationRequest:
                         indent_color = "\033[35m"  # Purple
 
                     # Extract underlying type from Twin[type]
-                    underlying_type = arg.var_type.replace("Twin[", "").replace("]", "") if arg.var_type.startswith("Twin[") else arg.var_type
+                    underlying_type = (
+                        arg.var_type.replace("Twin[", "").replace("]", "")
+                        if arg.var_type.startswith("Twin[")
+                        else arg.var_type
+                    )
 
                     data_lines.append(f"  {indent_color}│\033[0m {privacy_badge}")
-                    data_lines.append(f"  {indent_color}│\033[0m   Parameter: \033[36m{arg.name or 'unnamed'}\033[0m")
+                    data_lines.append(
+                        f"  {indent_color}│\033[0m   Parameter: \033[36m{arg.name or 'unnamed'}\033[0m"
+                    )
                     data_lines.append(f"  {indent_color}│\033[0m   Type: {underlying_type}")
                     data_lines.append(f"  {indent_color}│\033[0m   Owner: {arg.owner}")
 
                     if arg.has_public:
-                        data_lines.append(f"  {indent_color}│\033[0m   📊 Mock data available for testing")
+                        data_lines.append(
+                            f"  {indent_color}│\033[0m   📊 Mock data available for testing"
+                        )
                     if arg.has_private:
-                        data_lines.append(f"  {indent_color}│\033[0m   🔐 Real data available (you own this)")
+                        data_lines.append(
+                            f"  {indent_color}│\033[0m   🔐 Real data available (you own this)"
+                        )
 
                 elif isinstance(arg, dict) and arg.get("_beaver_remote_var"):
                     # RemoteVar reference
-                    var_type = arg.get('var_type', 'unknown')
-                    is_twin = var_type.startswith('Twin[')
+                    var_type = arg.get("var_type", "unknown")
+                    is_twin = var_type.startswith("Twin[")
 
                     if is_twin:
                         underlying_type = var_type.replace("Twin[", "").replace("]", "")
@@ -578,13 +599,16 @@ class ComputationRequest:
                         indent_color = "\033[36m"
 
                     data_lines.append(f"  {indent_color}│\033[0m {privacy_badge}")
-                    data_lines.append(f"  {indent_color}│\033[0m   Parameter: \033[36m{arg['name']}\033[0m")
+                    data_lines.append(
+                        f"  {indent_color}│\033[0m   Parameter: \033[36m{arg['name']}\033[0m"
+                    )
                     data_lines.append(f"  {indent_color}│\033[0m   Type: {underlying_type}")
                     data_lines.append(f"  {indent_color}│\033[0m   Owner: {arg['owner']}")
 
         # Check kwargs too
-        for k, v in self.kwargs.items():
+        for _k, v in self.kwargs.items():
             from .twin import Twin
+
             if isinstance(v, Twin) or (isinstance(v, dict) and v.get("_beaver_remote_var")):
                 has_data = True
                 # Similar logic for kwargs...
@@ -598,7 +622,10 @@ class ComputationRequest:
         static_args = []
         for i, arg in enumerate(self.args):
             from .twin import Twin
-            if not isinstance(arg, Twin) and not (isinstance(arg, dict) and arg.get("_beaver_remote_var")):
+
+            if not isinstance(arg, Twin) and not (
+                isinstance(arg, dict) and arg.get("_beaver_remote_var")
+            ):
                 arg_type = type(arg).__name__
                 arg_repr = repr(arg)
                 if len(arg_repr) > 50:
@@ -608,7 +635,10 @@ class ComputationRequest:
         static_kwargs = []
         for k, v in self.kwargs.items():
             from .twin import Twin
-            if not isinstance(v, Twin) and not (isinstance(v, dict) and v.get("_beaver_remote_var")):
+
+            if not isinstance(v, Twin) and not (
+                isinstance(v, dict) and v.get("_beaver_remote_var")
+            ):
                 v_type = type(v).__name__
                 v_repr = repr(v)
                 if len(v_repr) > 50:
@@ -674,7 +704,7 @@ class RemoteComputationPointer:
                 self.context._add_staged(self)
             print(f"📦 Staged: {self.result_name} = {self._func_name()}(...)")
             print(f"   Destination: {self.destination}")
-            print(f"   Use bv.send_staged() to send all")
+            print("   Use bv.send_staged() to send all")
         return self
 
     def send(self, *, wait: bool = False):
@@ -715,8 +745,9 @@ class RemoteComputationPointer:
         )
 
         # Pack and send the computation request
-        from .runtime import pack, write_envelope
         from pathlib import Path
+
+        from .runtime import pack, write_envelope
 
         envelope = pack(
             comp_request,
@@ -799,12 +830,12 @@ class RemoteComputationPointer:
         ]
 
         if self.status == "pending":
-            lines.append(f"  💡 Call .stage() or .send()")
+            lines.append("  💡 Call .stage() or .send()")
         elif self.status == "staged":
-            lines.append(f"  💡 Call bv.send_staged() to send")
+            lines.append("  💡 Call bv.send_staged() to send")
         elif self.status == "sent":
             lines.append(f"  💡 Sent at {self.sent_at[:19]}")
-            lines.append(f"  💡 Waiting for result... (auto-updates)")
+            lines.append("  💡 Waiting for result... (auto-updates)")
         elif self.status == "complete":
             lines.append(f"  ✓ Completed at {self.completed_at[:19]}")
             if self._result_value is not None:
@@ -812,7 +843,7 @@ class RemoteComputationPointer:
                 if len(result_repr) > 60:
                     result_repr = result_repr[:57] + "..."
                 lines.append(f"  ✓ Result: {result_repr}")
-                lines.append(f"  💡 Access with .value")
+                lines.append("  💡 Access with .value")
 
         if self.error:
             lines.append(f"  ❌ Error: {self.error}")
@@ -883,16 +914,13 @@ def execute_remote_computation(
                                 f"Remote var '{var.name}' (ID: {var_id[:12]}...) "
                                 f"has no stored value"
                             )
-                raise ValueError(
-                    f"Remote var ID {var_id[:12]}... not found in registry"
-                )
+                raise ValueError(f"Remote var ID {var_id[:12]}... not found in registry")
             else:
-                raise ValueError(
-                    f"Cannot resolve remote var reference without context"
-                )
+                raise ValueError("Cannot resolve remote var reference without context")
 
         # Check if this is a Twin - look it up in global Twin registry
-        from .twin import Twin, _TWIN_REGISTRY
+        from .twin import _TWIN_REGISTRY, Twin
+
         if isinstance(arg, Twin):
             if context:
                 # Try to find the owner's version of this Twin by (twin_id, owner)
@@ -921,7 +949,6 @@ def execute_remote_computation(
 
     # Resolve any remote var references in args/kwargs
     resolved_args = [resolve_arg(arg) for arg in args]
-    resolved_kwargs = {k: resolve_arg(v) for k, v in kwargs.items()}
 
     result_data = {
         "result": None,
@@ -999,9 +1026,7 @@ class StagingArea:
 
         lines = ["StagingArea:"]
         for comp in self.staged:
-            lines.append(
-                f"  📦 {comp.result_name} = {comp._func_name()}(...) → {comp.destination}"
-            )
+            lines.append(f"  📦 {comp.result_name} = {comp._func_name()}(...) → {comp.destination}")
         lines.append(f"\n💡 Call bv.send_staged() to send {len(self.staged)} item(s)")
 
         return "\n".join(lines)

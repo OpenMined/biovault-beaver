@@ -63,7 +63,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             env = read_envelope(p)
             obj = load(p, inject=inject)
             if args.debug:
-                print(f"[debug] Applied file: {p} id={env.envelope_id} name={env.name} type={type(obj).__name__} manifest={env.manifest}")
+                print(
+                    f"[debug] Applied file: {p} id={env.envelope_id} name={env.name} type={type(obj).__name__} manifest={env.manifest}"
+                )
         else:
             exec(item, globals())
             if args.debug:

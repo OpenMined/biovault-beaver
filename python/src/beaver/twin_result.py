@@ -93,7 +93,6 @@ class TwinComputationResult:
 
         # Create a computation with the Twin
         # The owner will see this and can approve it
-        from .twin import Twin
 
         # Find the Twin in the owner's remote vars
         print(f"🔒 Requesting private computation from {self.owner}")
@@ -101,7 +100,7 @@ class TwinComputationResult:
         print(f"   Function: {self.func.__name__}")
         print()
         print("💡 Next: Send a computation request to the owner")
-        print(f"   They can run it on the real data and send back the result")
+        print("   They can run it on the real data and send back the result")
         print()
 
         # TODO: Actually create and send the computation request

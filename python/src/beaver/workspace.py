@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 
 @dataclass
@@ -102,7 +102,6 @@ class WorkspaceView:
                 # Get type from manifest
                 manifest = data.get("manifest", {})
                 item_type = manifest.get("type", "unknown")
-                envelope_type = manifest.get("envelope_type", "unknown")
 
                 # Determine if it's a Twin
                 is_twin = "Twin" in item_type or item_type.startswith("Twin[")
@@ -115,17 +114,17 @@ class WorkspaceView:
                 # Parse timestamp
                 timestamp = None
                 if created_at:
-                    try:
+                    with contextlib.suppress(Exception):
                         timestamp = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                    except Exception:
-                        pass
 
                 # Create or update item
                 key = f"{sender}:{name}"
                 if key in self._items:
                     # Update existing (track versions)
                     self._items[key].version_count += 1
-                    if timestamp and (not self._items[key].timestamp or timestamp > self._items[key].timestamp):
+                    if timestamp and (
+                        not self._items[key].timestamp or timestamp > self._items[key].timestamp
+                    ):
                         self._items[key].timestamp = timestamp
                         self._items[key].envelope_id = envelope_id
                 else:
@@ -160,10 +159,8 @@ class WorkspaceView:
             # Parse timestamp
             timestamp = None
             if var.updated_at:
-                try:
+                with contextlib.suppress(Exception):
                     timestamp = datetime.fromisoformat(var.updated_at.replace("Z", "+00:00"))
-                except Exception:
-                    pass
 
             self._items[key] = WorkspaceItem(
                 name=name,
@@ -216,10 +213,8 @@ class WorkspaceView:
                     timestamp = None
                     updated_at = var_data.get("updated_at")
                     if updated_at:
-                        try:
+                        with contextlib.suppress(Exception):
                             timestamp = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
-                        except Exception:
-                            pass
 
                     self._items[key] = WorkspaceItem(
                         name=name,
@@ -235,7 +230,13 @@ class WorkspaceView:
                 # Skip malformed registries
                 pass
 
-    def __call__(self, *, user: Optional[str] = None, status: Optional[str] = None, item_type: Optional[str] = None) -> WorkspaceView:
+    def __call__(
+        self,
+        *,
+        user: Optional[str] = None,
+        status: Optional[str] = None,
+        item_type: Optional[str] = None,
+    ) -> WorkspaceView:
         """
         Filter workspace view.
 
@@ -280,7 +281,9 @@ class WorkspaceView:
             raise KeyError(f"Item not found: {name}")
 
         # Get most recent
-        latest = max(matches, key=lambda x: x.timestamp or datetime.min.replace(tzinfo=timezone.utc))
+        latest = max(
+            matches, key=lambda x: x.timestamp or datetime.min.replace(tzinfo=timezone.utc)
+        )
 
         # Load based on type
         if latest.status == "received":
@@ -316,7 +319,7 @@ class WorkspaceView:
         sorted_items = sorted(
             self._items.values(),
             key=lambda x: x.timestamp or datetime.min.replace(tzinfo=timezone.utc),
-            reverse=True
+            reverse=True,
         )
 
         # Limit to max_items
@@ -354,10 +357,14 @@ class WorkspaceView:
             # Format status with icon
             status_str = f"{item.status_icon} {item.status.title()}"
 
-            lines.append(f"{name_str:<20} {item.owner:<10} {type_str:<15} {status_str:<12} {last_action:<20}")
+            lines.append(
+                f"{name_str:<20} {item.owner:<10} {type_str:<15} {status_str:<12} {last_action:<20}"
+            )
 
         if len(sorted_items) > max_items:
-            lines.append(f"... and {len(sorted_items) - max_items} more (increase bv.settings.workspace_max_items)")
+            lines.append(
+                f"... and {len(sorted_items) - max_items} more (increase bv.settings.workspace_max_items)"
+            )
 
         lines.append("━" * 80)
         lines.append("💡 Access: ws['name'], Filter: ws(user='bob'), ws(status='live')")
@@ -377,7 +384,7 @@ class WorkspaceView:
         sorted_items = sorted(
             self._items.values(),
             key=lambda x: x.timestamp or datetime.min.replace(tzinfo=timezone.utc),
-            reverse=True
+            reverse=True,
         )
 
         rows = []

@@ -6,9 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 from uuid import uuid4
 
-from .remote_data import RemoteData
 from .live_mixin import LiveMixin
-
+from .remote_data import RemoteData
 
 # Global registry of Twins with private data (for computation resolution)
 # Key: (twin_id, owner) -> Twin instance
@@ -91,13 +90,27 @@ class Twin(LiveMixin, RemoteData):
             _TWIN_REGISTRY[key] = self
 
     @classmethod
-    def public_only(cls, public: Any, owner: str = "unknown", live_enabled: bool = False, live_interval: float = 2.0, **kwargs):
+    def public_only(
+        cls,
+        public: Any,
+        owner: str = "unknown",
+        live_enabled: bool = False,
+        live_interval: float = 2.0,
+        **kwargs,
+    ):
         """
         Create a Twin with only public data (no private).
 
         Used when receiving a Twin from remote.
         """
-        return cls(private=None, public=public, owner=owner, live_enabled=live_enabled, live_interval=live_interval, **kwargs)
+        return cls(
+            private=None,
+            public=public,
+            owner=owner,
+            live_enabled=live_enabled,
+            live_interval=live_interval,
+            **kwargs,
+        )
 
     # ===================================================================
     # RemoteData abstract method implementations
@@ -182,10 +195,11 @@ class Twin(LiveMixin, RemoteData):
             context: BeaverContext to use for sending (auto-detected if None)
             name: Override variable name (auto-detected from caller if None)
         """
-        from .computation import ComputationRequest
-        from .runtime import pack, write_envelope, _get_var_name_from_caller
-        from pathlib import Path
         import inspect
+        from pathlib import Path
+
+        from .computation import ComputationRequest
+        from .runtime import _get_var_name_from_caller, pack, write_envelope
 
         # Check if private is a ComputationRequest (result Twin)
         if isinstance(self.private, ComputationRequest):
@@ -199,10 +213,12 @@ class Twin(LiveMixin, RemoteData):
                     for scope in [caller_locals, caller_globals]:
                         if context:
                             break
-                        for var_name, var_obj in scope.items():
-                            if (hasattr(var_obj, 'remote_vars') and
-                                hasattr(var_obj, 'user') and
-                                hasattr(var_obj, 'inbox_path')):
+                        for _var_name, var_obj in scope.items():
+                            if (
+                                hasattr(var_obj, "remote_vars")
+                                and hasattr(var_obj, "user")
+                                and hasattr(var_obj, "inbox_path")
+                            ):
                                 context = var_obj
                                 break
 
@@ -241,6 +257,7 @@ class Twin(LiveMixin, RemoteData):
 
             # Register this Twin for auto-updates
             from .computation import _register_twin_result
+
             _register_twin_result(self.private.comp_id, self)
 
         else:
@@ -260,22 +277,25 @@ class Twin(LiveMixin, RemoteData):
             context: BeaverContext for sending updates (auto-detected if None)
         """
         # Initialize if not present (deserialized objects)
-        if not hasattr(self, '_live_subscribers'):
+        if not hasattr(self, "_live_subscribers"):
             self._live_subscribers = []
-        if not hasattr(self, '_live_context'):
+        if not hasattr(self, "_live_context"):
             self._live_context = None
 
         # Auto-detect context if not provided
         if context is None and self._live_context is None:
             import inspect
+
             frame = inspect.currentframe()
             while frame and frame.f_back:
                 frame = frame.f_back
                 for scope in [frame.f_locals, frame.f_globals]:
-                    for var_name, var_obj in scope.items():
-                        if (hasattr(var_obj, 'remote_vars') and
-                            hasattr(var_obj, 'user') and
-                            hasattr(var_obj, 'inbox_path')):
+                    for _var_name, var_obj in scope.items():
+                        if (
+                            hasattr(var_obj, "remote_vars")
+                            and hasattr(var_obj, "user")
+                            and hasattr(var_obj, "inbox_path")
+                        ):
                             self._live_context = var_obj
                             break
                     if self._live_context:
@@ -287,13 +307,13 @@ class Twin(LiveMixin, RemoteData):
             self._live_context = context
 
         if not self._live_context:
-            print(f"⚠️  Could not find BeaverContext - pass context= parameter")
+            print("⚠️  Could not find BeaverContext - pass context= parameter")
             return
 
         if user not in self._live_subscribers:
             self._live_subscribers.append(user)
             print(f"📡 Added '{user}' as live subscriber to Twin '{self.name}'")
-            print(f"💡 Enable live sync to start sending updates: .enable_live()")
+            print("💡 Enable live sync to start sending updates: .enable_live()")
         else:
             print(f"⚠️  '{user}' is already subscribed")
 
@@ -304,7 +324,7 @@ class Twin(LiveMixin, RemoteData):
         Args:
             user: Username to unsubscribe
         """
-        if not hasattr(self, '_live_subscribers'):
+        if not hasattr(self, "_live_subscribers"):
             return
 
         if user in self._live_subscribers:
@@ -327,26 +347,29 @@ class Twin(LiveMixin, RemoteData):
         Returns:
             Generator that yields the Twin whenever it updates
         """
-        import time
         import threading
+        import time
 
         # Auto-detect context
         if context is None:
             import inspect
+
             frame = inspect.currentframe()
             if frame and frame.f_back:
                 for scope in [frame.f_back.f_locals, frame.f_back.f_globals]:
-                    for var_name, var_obj in scope.items():
-                        if (hasattr(var_obj, 'remote_vars') and
-                            hasattr(var_obj, 'user') and
-                            hasattr(var_obj, 'inbox_path')):
+                    for _var_name, var_obj in scope.items():
+                        if (
+                            hasattr(var_obj, "remote_vars")
+                            and hasattr(var_obj, "user")
+                            and hasattr(var_obj, "inbox_path")
+                        ):
                             context = var_obj
                             break
                     if context:
                         break
 
         if not context:
-            print(f"⚠️  Could not find BeaverContext - pass context= parameter")
+            print("⚠️  Could not find BeaverContext - pass context= parameter")
             return
 
         print(f"👁️  Watching for live updates to Twin '{self.name}'...")
@@ -362,9 +385,7 @@ class Twin(LiveMixin, RemoteData):
                 try:
                     for envelope in context.inbox():
                         # Check if this is an update to our Twin
-                        if (envelope.name == self.name and
-                            envelope.sender == self.owner):
-
+                        if envelope.name == self.name and envelope.sender == self.owner:
                             # Skip if we've already processed this envelope
                             if envelope.envelope_id in seen_envelope_ids:
                                 continue
@@ -383,7 +404,7 @@ class Twin(LiveMixin, RemoteData):
 
                                 # Yield the updated Twin
                                 yield self
-                except Exception as e:
+                except Exception:
                     # Don't crash on inbox errors
                     pass
 
@@ -401,8 +422,8 @@ class Twin(LiveMixin, RemoteData):
         """Delegate len() to preferred value."""
         try:
             return len(self.value)
-        except (TypeError, ValueError):
-            raise TypeError(f"Twin has no len()")
+        except (TypeError, ValueError) as err:
+            raise TypeError("Twin has no len()") from err
 
     def __getitem__(self, key):
         """Delegate indexing to preferred value."""
@@ -449,7 +470,7 @@ class Twin(LiveMixin, RemoteData):
                 private_repr = private_repr[:57] + "..."
             lines.append(f"  \033[31m🔒 Private\033[0m    {private_repr}    ← .value uses this")
         else:
-            lines.append(f"  🔒 Private    (not available) 💡 .request_private()")
+            lines.append("  🔒 Private    (not available) 💡 .request_private()")
 
         # Public side
         if self.has_public:
@@ -459,7 +480,7 @@ class Twin(LiveMixin, RemoteData):
             active_marker = "    ← .value uses this" if not self.has_private else "    ✓"
             lines.append(f"  \033[32m🌍 Public\033[0m    {public_repr}{active_marker}")
         else:
-            lines.append(f"  🌍 Public    (not set)")
+            lines.append("  🌍 Public    (not set)")
 
         # Owner (if not local)
         if not self.has_private:
@@ -470,7 +491,9 @@ class Twin(LiveMixin, RemoteData):
             lines.extend(self._display_live_status())
 
         # IDs (compact)
-        lines.append(f"  IDs: twin={self.twin_id[:8]}... private={self.private_id[:8]}... public={self.public_id[:8]}...")
+        lines.append(
+            f"  IDs: twin={self.twin_id[:8]}... private={self.private_id[:8]}... public={self.public_id[:8]}..."
+        )
 
         return "\n".join(lines)
 
@@ -489,7 +512,7 @@ class Twin(LiveMixin, RemoteData):
                 private_repr = private_repr[:57] + "..."
             private_html = f"<tr><td>🔒 Private</td><td><code>{private_repr}</code></td><td><span style='color: green; font-weight: bold;'>← .value uses this</span></td></tr>"
         else:
-            private_html = f"<tr><td>🔒 Private</td><td><i>not available</i></td><td><a href='#'>.request_private()</a></td></tr>"
+            private_html = "<tr><td>🔒 Private</td><td><i>not available</i></td><td><a href='#'>.request_private()</a></td></tr>"
 
         public_html = ""
         if self.has_public:
@@ -503,7 +526,7 @@ class Twin(LiveMixin, RemoteData):
             )
             public_html = f"<tr><td>🌍 Public</td><td><code>{public_repr}</code></td><td>{active_marker}</td></tr>"
         else:
-            public_html = f"<tr><td>🌍 Public</td><td><i>not set</i></td><td></td></tr>"
+            public_html = "<tr><td>🌍 Public</td><td><i>not set</i></td><td></td></tr>"
 
         owner_html = ""
         if not self.has_private:
@@ -515,7 +538,7 @@ class Twin(LiveMixin, RemoteData):
             mode = "mutable" if self._live_mutable else "read-only"
             live_html = f"<tr><td>Live</td><td colspan='2'>🟢 Enabled ({mode}, {self._live_interval}s)</td></tr>"
         else:
-            live_html = f"<tr><td>Live</td><td colspan='2'>⚫ Disabled</td></tr>"
+            live_html = "<tr><td>Live</td><td colspan='2'>⚫ Disabled</td></tr>"
 
         # Choose border color based on Twin state
         # Red = real/private data (sensitive)

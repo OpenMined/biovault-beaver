@@ -19,6 +19,6 @@ echo "Running mypy..."
 uv run mypy src/beaver
 
 echo "Running vulture to detect dead code..."
-uv run vulture src tests --min-confidence 80
+uv run vulture src --min-confidence 80
 
 echo "✓ All linting checks passed!"

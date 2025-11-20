@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent / "python/src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "python/src"))
 
 import time
 from beaver import Twin

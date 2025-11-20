@@ -22,8 +22,8 @@ from .envelope import BeaverEnvelope
 def _strip_ansi_codes(text: str) -> str:
     """Remove ANSI color codes from text."""
     # Pattern matches ANSI escape sequences like \033[31m (red) or \033[0m (reset)
-    ansi_pattern = re.compile(r'\033\[[0-9;]*m')
-    return ansi_pattern.sub('', text)
+    ansi_pattern = re.compile(r"\033\[[0-9;]*m")
+    return ansi_pattern.sub("", text)
 
 
 def _get_var_name_from_caller(obj: Any, depth: int = 2) -> Optional[str]:
@@ -49,6 +49,7 @@ def _get_var_name_from_caller(obj: Any, depth: int = 2) -> Optional[str]:
 
         # Get the calling line of code
         import linecache
+
         filename = frame.f_code.co_filename
         lineno = frame.f_lineno
         line = linecache.getline(filename, lineno).strip()
@@ -60,25 +61,23 @@ def _get_var_name_from_caller(obj: Any, depth: int = 2) -> Optional[str]:
         # my_var.request_private(context=bv)
 
         # Match: .send(varname, ...) or .send(varname)
-        match = re.search(r'\.send\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*)', line)
+        match = re.search(r"\.send\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*)", line)
         if match:
             var_name = match.group(1)
             # Verify this variable exists in the caller's locals and references our object
-            if var_name in frame.f_locals:
-                if frame.f_locals[var_name] is obj:
-                    return var_name
+            if var_name in frame.f_locals and frame.f_locals[var_name] is obj:
+                return var_name
 
         # Match: varname.request_private(...) or varname.method()
-        match = re.search(r'([a-zA-Z_][a-zA-Z0-9_]*)\s*\.\s*\w+\s*\(', line)
+        match = re.search(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*\.\s*\w+\s*\(", line)
         if match:
             var_name = match.group(1)
             # Verify this variable exists in the caller's locals and references our object
-            if var_name in frame.f_locals:
-                if frame.f_locals[var_name] is obj:
-                    return var_name
+            if var_name in frame.f_locals and frame.f_locals[var_name] is obj:
+                return var_name
 
         # Fallback: check if obj has a __name__ attribute (functions, classes)
-        if hasattr(obj, '__name__'):
+        if hasattr(obj, "__name__"):
             return obj.__name__
 
     except Exception:
@@ -234,6 +233,7 @@ def pack(
 
     # Register Twin type so it can be deserialized
     from .twin import Twin
+
     fory.register_type(Twin)
 
     payload = fory.dumps(obj_to_send)
@@ -312,6 +312,7 @@ def unpack(
 
     # Register Twin type so it can be deserialized
     from .twin import Twin
+
     fory.register_type(Twin)
 
     return fory.loads(envelope.payload)
@@ -377,7 +378,7 @@ def _check_overwrite(obj: Any, *, globals_ns: dict, name_hint: Optional[str]) ->
     # Prompt for confirmation
     try:
         response = input("Overwrite? [y/N]: ").strip().lower()
-        return response in ('y', 'yes')
+        return response in ("y", "yes")
     except (EOFError, KeyboardInterrupt):
         print()
         return False
@@ -452,10 +453,7 @@ def load_by_id(
     if inject:
         if globals_ns is None:
             frame = inspect.currentframe()
-            if frame and frame.f_back:
-                globals_ns = frame.f_back.f_globals
-            else:
-                globals_ns = globals()
+            globals_ns = frame.f_back.f_globals if frame and frame.f_back else globals()
         _inject(obj, globals_ns=globals_ns, name_hint=env.name)
     return env, obj
 
@@ -609,10 +607,7 @@ def load(
     if inject:
         if globals_ns is None:
             frame = inspect.currentframe()
-            if frame and frame.f_back:
-                globals_ns = frame.f_back.f_globals
-            else:
-                globals_ns = globals()
+            globals_ns = frame.f_back.f_globals if frame and frame.f_back else globals()
         _inject(obj, globals_ns=globals_ns, name_hint=env.name)
     return obj
 
@@ -728,7 +723,7 @@ class SendResult:
         """Beautiful SendResult display."""
         lines = []
         lines.append("━" * 70)
-        lines.append(f"📤 Send Result")
+        lines.append("📤 Send Result")
         lines.append("━" * 70)
 
         # Extract recipient from path (e.g., shared/bob/file.beaver -> bob)
@@ -748,12 +743,7 @@ class SendResult:
         # Content type from manifest
         obj_type = self.envelope.manifest.get("type", "Unknown")
         envelope_type = self.envelope.manifest.get("envelope_type", "")
-
-        if envelope_type:
-            type_display = f"{obj_type} ({envelope_type})"
-        else:
-            type_display = obj_type
-
+        type_display = f"{obj_type} ({envelope_type})" if envelope_type else obj_type
         lines.append(f"📦 Type: {type_display}")
 
         # Status
@@ -787,10 +777,11 @@ def export(
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             # Check if any arguments are RemoteVarPointers or Twins
-            from .remote_vars import RemoteVarPointer
-            from .computation import RemoteComputationPointer, ComputationRequest
-            from .twin import Twin
             from uuid import uuid4
+
+            from .computation import ComputationRequest, RemoteComputationPointer
+            from .remote_vars import RemoteVarPointer
+            from .twin import Twin
 
             has_remote_pointer = False
             has_twin = False
@@ -837,13 +828,9 @@ def export(
             # If Twins detected, return Twin result
             if has_twin:
                 # Execute on public data immediately
-                public_args = tuple(
-                    arg.public if isinstance(arg, Twin) else arg
-                    for arg in args
-                )
+                public_args = tuple(arg.public if isinstance(arg, Twin) else arg for arg in args)
                 public_kwargs = {
-                    k: v.public if isinstance(v, Twin) else v
-                    for k, v in kwargs.items()
+                    k: v.public if isinstance(v, Twin) else v for k, v in kwargs.items()
                 }
 
                 try:
@@ -879,6 +866,7 @@ def export(
 
         class BoundFunction:
             """A function with bound arguments ready to send."""
+
             def __init__(self, bound_func, bound_args, bound_kwargs):
                 self.bound_func = bound_func
                 self.bound_args = bound_args
@@ -975,9 +963,7 @@ class UserRemoteVars:
         if self._remote_vars_view is None:
             from .remote_vars import RemoteVarView
 
-            registry_path = (
-                self.context._public_dir / self.username / "remote_vars.json"
-            )
+            registry_path = self.context._public_dir / self.username / "remote_vars.json"
             data_dir = self.context._base_dir / self.username
 
             self._remote_vars_view = RemoteVarView(
@@ -1014,6 +1000,7 @@ class BeaverContext:
 
         # Settings
         from .settings import BeaverSettings
+
         self._settings = BeaverSettings()
 
         # Remote vars setup
@@ -1136,11 +1123,8 @@ class BeaverContext:
             import time
 
             while not self._stop_auto_load:
-                try:
+                with contextlib.suppress(Exception):
                     self._check_and_load_replies()
-                except Exception as e:
-                    # Silently handle errors to keep thread alive
-                    pass
 
                 time.sleep(self._poll_interval)
 
@@ -1148,7 +1132,9 @@ class BeaverContext:
             target=auto_load_loop, daemon=True, name=f"beaver-autoload-{self.user}"
         )
         self._auto_load_thread.start()
-        print(f"🔄 Auto-load replies enabled for {self.user} (polling every {self._poll_interval}s)")
+        print(
+            f"🔄 Auto-load replies enabled for {self.user} (polling every {self._poll_interval}s)"
+        )
 
     def stop_auto_load(self):
         """Stop auto-loading replies."""
@@ -1185,9 +1171,9 @@ class BeaverContext:
                     updated = _update_computation_pointer(envelope.reply_to, obj)
 
                     if updated:
-                        print(f"✨ Auto-updated computation pointer!")
-                        print(f"   Variable holding the pointer now has result")
-                        print(f"   Access with .value or just print the variable")
+                        print("✨ Auto-updated computation pointer!")
+                        print("   Variable holding the pointer now has result")
+                        print("   Access with .value or just print the variable")
 
                     # Also try to update Twin results
                     twin_updated = _update_twin_result(envelope.reply_to, obj)
@@ -1208,6 +1194,7 @@ class BeaverContext:
                         if target_globals is None:
                             # Fallback to main module
                             import __main__
+
                             target_globals = __main__.__dict__
 
                         # Inject into globals with envelope name
@@ -1224,6 +1211,7 @@ class BeaverContext:
 
     def __call__(self, func=None, **kwargs):
         """Allow @bv as a decorator; kwargs override context defaults."""
+
         def decorator(f):
             # capture base paths for user targeting inside the wrapper
             base_out = Path(kwargs.get("out_dir", self.outbox))
@@ -1269,7 +1257,7 @@ class BeaverContext:
         name = kwargs.get("name")
         if name is None:
             # Check if object has a .name attribute (like Twin)
-            if hasattr(obj, 'name') and obj.name:
+            if hasattr(obj, "name") and obj.name:
                 name = obj.name
             else:
                 # Auto-detect from caller's variable name
@@ -1286,8 +1274,8 @@ class BeaverContext:
             strict=kwargs.get("strict", self.strict),
             policy=kwargs.get("policy", self.policy),
         )
-        out_dir = kwargs.get("out_dir", None)
-        to_user = kwargs.get("user", None)
+        out_dir = kwargs.get("out_dir")
+        to_user = kwargs.get("user")
         if out_dir is None:
             if to_user:
                 base = Path(self.outbox).parent
@@ -1360,7 +1348,7 @@ class BeaverContext:
         by_sender: bool = False,
         by_size: bool = False,
         by_type: bool = False,
-        **kwargs
+        **kwargs,
     ):
         """
         Return an InboxView for the current inbox with optional sorting.
@@ -1403,6 +1391,7 @@ class BeaverContext:
 
         # Sort
         if sort_by:
+
             def sort_key(env):
                 if sort_by == "name":
                     return env.name or ""
@@ -1415,6 +1404,7 @@ class BeaverContext:
                 elif sort_by == "type":
                     return env.manifest.get("type", "")
                 return ""
+
             envelopes = sorted(envelopes, key=sort_key, reverse=reverse)
 
         return InboxView(inbox_path, envelopes)

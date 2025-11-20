@@ -39,7 +39,17 @@ class BeaverEnvelope:
             name = self.envelope_id
         return f"{name}{suffix}"
 
-    def load(self, *, inject: bool = True, overwrite: bool = True, globals_ns: Optional[dict] = None, strict: bool = False, policy=None, live: bool = True, context=None) -> Any:
+    def load(
+        self,
+        *,
+        inject: bool = True,
+        overwrite: bool = True,
+        globals_ns: Optional[dict] = None,
+        strict: bool = False,
+        policy=None,
+        live: bool = True,
+        context=None,
+    ) -> Any:
         """
         Load the envelope payload and inject into caller's globals.
 
@@ -52,15 +62,17 @@ class BeaverEnvelope:
             live: If True and object is a live-enabled Twin, auto-subscribe for updates (default: True)
             context: BeaverContext for live subscription (auto-detected if None)
         """
-        from .runtime import unpack, _inject, _check_overwrite
         import inspect
+
+        from .runtime import _check_overwrite, _inject, unpack
 
         obj = unpack(self, strict=strict, policy=policy)
 
         # Auto-subscribe to live updates if this is a live-enabled Twin
         if live:
             from .twin import Twin
-            if isinstance(obj, Twin) and hasattr(obj, '_live_enabled') and obj._live_enabled:
+
+            if isinstance(obj, Twin) and hasattr(obj, "_live_enabled") and obj._live_enabled:
                 # Auto-detect context if not provided
                 if context is None:
                     # Try to find BeaverContext in caller's scope
@@ -68,10 +80,12 @@ class BeaverEnvelope:
                     while frame and frame.f_back:
                         frame = frame.f_back
                         for scope in [frame.f_locals, frame.f_globals]:
-                            for var_name, var_obj in scope.items():
-                                if (hasattr(var_obj, 'remote_vars') and
-                                    hasattr(var_obj, 'user') and
-                                    hasattr(var_obj, 'inbox_path')):
+                            for _var_name, var_obj in scope.items():
+                                if (
+                                    hasattr(var_obj, "remote_vars")
+                                    and hasattr(var_obj, "user")
+                                    and hasattr(var_obj, "inbox_path")
+                                ):
                                     context = var_obj
                                     break
                             if context:
@@ -82,7 +96,9 @@ class BeaverEnvelope:
                 if context:
                     # Start watching for live updates in background
                     print(f"📡 Auto-subscribed to live updates for Twin '{obj.name or 'unnamed'}'")
-                    print(f"💡 Use .watch_live() to get updates, or reload with live=False to disable")
+                    print(
+                        "💡 Use .watch_live() to get updates, or reload with live=False to disable"
+                    )
                     # Note: We don't actually start watching here, just inform the user
                     # They need to call watch_live() to get the generator
 
@@ -94,9 +110,10 @@ class BeaverEnvelope:
                     globals_ns = frame.f_back.f_globals
 
                 # Fallback for Jupyter notebooks
-                if globals_ns is None or '__IPYTHON__' in globals_ns:
+                if globals_ns is None or "__IPYTHON__" in globals_ns:
                     try:
                         import __main__
+
                         globals_ns = __main__.__dict__
                     except ImportError:
                         pass
@@ -104,7 +121,9 @@ class BeaverEnvelope:
             if globals_ns is not None:
                 # Check for overwrites if needed
                 if not overwrite:
-                    should_proceed = _check_overwrite(obj, globals_ns=globals_ns, name_hint=self.name)
+                    should_proceed = _check_overwrite(
+                        obj, globals_ns=globals_ns, name_hint=self.name
+                    )
                     if not should_proceed:
                         print("⚠️  Load cancelled - no variables were overwritten")
                         return obj
@@ -169,19 +188,23 @@ class BeaverEnvelope:
                 # Try to load and inspect the computation
                 try:
                     from .runtime import unpack
+
                     comp_req = unpack(self, strict=False)
 
                     # Get context if we can (walk up frame stack)
                     context = None
                     import inspect
+
                     current = inspect.currentframe()
                     while current and current.f_back and context is None:
                         current = current.f_back
                         for scope in [current.f_locals, current.f_globals]:
-                            for var_name, var_obj in scope.items():
-                                if (hasattr(var_obj, 'remote_vars') and
-                                    hasattr(var_obj, 'user') and
-                                    hasattr(var_obj, 'inbox_path')):
+                            for _var_name, var_obj in scope.items():
+                                if (
+                                    hasattr(var_obj, "remote_vars")
+                                    and hasattr(var_obj, "user")
+                                    and hasattr(var_obj, "inbox_path")
+                                ):
                                     context = var_obj
                                     break
                             if context:
@@ -194,17 +217,18 @@ class BeaverEnvelope:
                         for i, arg in enumerate(comp_req.args):
                             # Check if this is a RemoteVar/Twin reference
                             if isinstance(arg, dict) and arg.get("_beaver_remote_var"):
-                                twin_type = arg.get('var_type', 'unknown')
-                                is_twin = twin_type.startswith('Twin[')
+                                twin_type = arg.get("var_type", "unknown")
+                                is_twin = twin_type.startswith("Twin[")
 
                                 if is_twin:
                                     # Try to find the actual Twin to check privacy status
                                     has_private = False
                                     has_public = False
-                                    if context and arg['owner'] == context.user:
+                                    if context and arg["owner"] == context.user:
                                         for var in context.remote_vars.vars.values():
-                                            if var.var_id == arg['var_id']:
+                                            if var.var_id == arg["var_id"]:
                                                 from .twin import Twin
+
                                                 if isinstance(var._stored_value, Twin):
                                                     has_private = var._stored_value.has_private
                                                     has_public = var._stored_value.has_public
@@ -225,9 +249,11 @@ class BeaverEnvelope:
                                         f"(type: {twin_type}, owner: {arg['owner']})"
                                     )
                                     if has_public:
-                                        lines.append(f"      📊 Mock data available for testing")
-                                    if has_private and context and arg['owner'] == context.user:
-                                        lines.append(f"      🔐 Real data available (you're the owner)")
+                                        lines.append("      📊 Mock data available for testing")
+                                    if has_private and context and arg["owner"] == context.user:
+                                        lines.append(
+                                            "      🔐 Real data available (you're the owner)"
+                                        )
                                 else:
                                     # Regular RemoteVar
                                     lines.append(
@@ -235,10 +261,12 @@ class BeaverEnvelope:
                                         f"(type: {twin_type}, owner: {arg['owner']})"
                                     )
                             # Check if it's a Twin object directly (shouldn't happen but handle it)
-                            elif hasattr(arg, '__class__') and arg.__class__.__name__ == 'Twin':
+                            elif hasattr(arg, "__class__") and arg.__class__.__name__ == "Twin":
                                 from .twin import Twin
+
                                 if isinstance(arg, Twin):
                                     from .runtime import _strip_ansi_codes
+
                                     # Twin should have been serialized, but handle it anyway
                                     if arg.has_private and arg.has_public:
                                         privacy = "⚠️  REAL + MOCK"
@@ -256,11 +284,12 @@ class BeaverEnvelope:
                                 # Static bound value
                                 arg_type = type(arg).__name__
                                 from .runtime import _strip_ansi_codes
+
                                 arg_repr = _strip_ansi_codes(repr(arg))
                                 if len(arg_repr) > 60:
                                     arg_repr = arg_repr[:57] + "..."
                                 lines.append(f"  [{i}] {arg_type}: {arg_repr}")
-                                lines.append(f"      📌 Static value (bound at call time)")
+                                lines.append("      📌 Static value (bound at call time)")
 
                     # Show kwargs if any
                     if comp_req.kwargs:
@@ -269,11 +298,12 @@ class BeaverEnvelope:
                         for k, v in comp_req.kwargs.items():
                             v_type = type(v).__name__
                             from .runtime import _strip_ansi_codes
+
                             v_repr = _strip_ansi_codes(repr(v))
                             if len(v_repr) > 60:
                                 v_repr = v_repr[:57] + "..."
                             lines.append(f"  {k}= {v_type}: {v_repr}")
-                            lines.append(f"      📌 Static value (bound at call time)")
+                            lines.append("      📌 Static value (bound at call time)")
 
                 except Exception as e:
                     lines.append("")
@@ -346,6 +376,7 @@ class BeaverEnvelope:
             # Show preview
             if preview:
                 import html as html_module
+
                 escaped_preview = html_module.escape(preview)
                 html.append("<br><br><b>Preview:</b>")
                 html.append(
@@ -366,10 +397,10 @@ class BeaverEnvelope:
             if source:
                 try:
                     from pygments import highlight
-                    from pygments.lexers import PythonLexer
                     from pygments.formatters import HtmlFormatter
+                    from pygments.lexers import PythonLexer
 
-                    formatter = HtmlFormatter(style='monokai', noclasses=True)
+                    formatter = HtmlFormatter(style="monokai", noclasses=True)
                     highlighted = highlight(source, PythonLexer(), formatter)
                     html.append("<br><br><b>Source:</b>")
                     html.append(
@@ -379,6 +410,7 @@ class BeaverEnvelope:
                 except ImportError:
                     # Fallback if pygments not available
                     import html as html_module
+
                     escaped_source = html_module.escape(source)
                     html.append("<br><br><b>Source:</b>")
                     html.append(

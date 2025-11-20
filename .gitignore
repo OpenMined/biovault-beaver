@@ -68,3 +68,5 @@ examples/herc2/classify_herc2_*.py
 
 examples/**/work/*
 examples/**/.nextflow*
+
+sandbox/**

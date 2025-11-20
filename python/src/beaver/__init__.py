@@ -34,6 +34,8 @@ from .runtime import (
     wait_for_reply,
     write_envelope,
 )
+from .twin import Twin
+from .twin_result import TwinComputationResult
 
 __version__ = "0.1.23"
 __all__ = [
@@ -51,6 +53,8 @@ __all__ = [
     "RemoteVarView",
     "StagingArea",
     "SendResult",
+    "Twin",
+    "TwinComputationResult",
     "connect",
     "execute_remote_computation",
     "export",

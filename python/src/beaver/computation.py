@@ -35,6 +35,29 @@ def _update_computation_pointer(comp_id: str, result_value: Any):
     return False
 
 
+# Global registry of Twin results awaiting updates
+_TWIN_RESULTS = {}
+
+
+def _register_twin_result(comp_id: str, twin):
+    """Register a Twin result for auto-updates when computation completes."""
+    _TWIN_RESULTS[comp_id] = twin
+
+
+def _update_twin_result(comp_id: str, result_value: Any):
+    """Update a Twin's private side with the computation result."""
+    if comp_id in _TWIN_RESULTS:
+        twin = _TWIN_RESULTS[comp_id]
+        # Update the private side with the actual result
+        object.__setattr__(twin, 'private', result_value)
+        print(f"✨ Twin result auto-updated: {twin.name or twin.twin_id[:8]}...")
+        print(f"   .value now uses private (approved result)")
+        # Remove from registry after updating
+        del _TWIN_RESULTS[comp_id]
+        return True
+    return False
+
+
 @dataclass
 class ComputationResult:
     """
@@ -64,12 +87,77 @@ class ComputationResult:
         self.result = value
 
     def approve(self):
-        """Approve and send the result back to the requester."""
-        return self._send_result(self.result)
+        """
+        Approve and send the private/real result back to the requester.
+
+        If result is a Twin, sends the private side only.
+        """
+        from .twin import Twin
+
+        if isinstance(self.result, Twin):
+            if self.result.has_private:
+                print(f"✅ Approving private/real result for: {self.var_name}")
+                return self._send_result(self.result.private)
+            else:
+                raise ValueError("Twin has no private data to approve")
+        else:
+            return self._send_result(self.result)
+
+    def approve_mock(self):
+        """
+        Approve and send only the mock/public result back.
+
+        Useful for iterative development - lets requester continue working
+        with mock data while you review the private computation.
+        """
+        from .twin import Twin
+
+        if isinstance(self.result, Twin):
+            if self.result.has_public:
+                print(f"🧪 Approving mock/public result for: {self.var_name}")
+                print(f"   💡 Requester can continue development with mock data")
+                return self._send_result(self.result.public)
+            else:
+                raise ValueError("Twin has no public data to approve")
+        else:
+            raise ValueError("Result is not a Twin - use .approve() instead")
 
     def approve_with(self, value):
         """Approve with a substituted value."""
         return self._send_result(value)
+
+    def reject(self, message="Request rejected"):
+        """
+        Reject the computation request with an explanation.
+
+        Sends a rejection message back to the requester.
+        """
+        if not self.context:
+            raise ValueError("No context available for sending rejection")
+
+        print(f"❌ Rejecting computation: {self.var_name}")
+        print(f"   Reason: {message}")
+        print(f"   Notifying: {self.sender}")
+
+        # Create rejection message
+        rejection = {
+            "_beaver_rejection": True,
+            "comp_id": self.comp_id,
+            "result_name": self.var_name,
+            "message": message,
+            "rejected_at": _iso_now()
+        }
+
+        # Send rejection back
+        result = self.context.send(
+            rejection,
+            name=f"rejection_{self.var_name}",
+            user=self.sender,
+            reply_to=self.comp_id,
+        )
+
+        print(f"✓ Rejection sent to {self.sender}'s inbox")
+        return result
 
     def _send_result(self, value):
         """Send the result back to the requester."""
@@ -93,35 +181,78 @@ class ComputationResult:
         return result
 
     def __repr__(self) -> str:
-        """String representation."""
-        lines = [
-            f"ComputationResult: {self.var_name}",
-            f"  From request by: {self.sender}",
-            f"  Result ID: {self.var_id[:12]}...",
-            f"  Comp ID: {self.comp_id[:12]}...",
-        ]
+        """String representation - shows Twin directly with context."""
+        from .twin import Twin
 
-        if self.error:
-            lines.append(f"  ❌ Error: {self.error}")
+        # If result is a Twin, show it directly with minimal wrapper
+        if isinstance(self.result, Twin):
+            lines = []
+            lines.append(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append(f"ComputationResult: {self.var_name}")
+            lines.append(f"  Request from: {self.sender}")
+            lines.append(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append("")
+
+            # Show the Twin directly (use its __str__)
+            twin_str = str(self.result)
+            lines.append(twin_str)
+
+            # Add execution info if available
+            if self.error:
+                lines.append(f"\n  ❌ Execution Error: {self.error}")
+
+            if self.stdout and self.stdout.strip():
+                lines.append(f"\n  📤 Output captured during execution:")
+                for line in self.stdout.strip().split('\n')[:5]:  # Show first 5 lines
+                    lines.append(f"     {line}")
+                if len(self.stdout.strip().split('\n')) > 5:
+                    lines.append(f"     ... ({len(self.stdout.strip().split('\n')) - 5} more lines)")
+
+            # Show actions based on Twin state
+            lines.append("")
+            lines.append("  💡 Actions:")
+            if self.result.has_private and self.result.has_public:
+                lines.append("     .approve()           - Send private/real result back")
+                lines.append("     .approve_mock()      - Send mock result (continue iteration)")
+            elif self.result.has_private:
+                lines.append("     .approve()           - Send private/real result back")
+            elif self.result.has_public:
+                lines.append("     .approve_mock()      - Send mock result back")
+
+            lines.append("     .reject(message)     - Reject with explanation")
+            lines.append("     .data                - Access Twin to inspect/modify")
+
+            return "\n".join(lines)
+
+        # Non-Twin result (legacy/error case)
         else:
-            result_type = type(self.result).__name__
-            result_repr = repr(self.result)
-            if len(result_repr) > 60:
-                result_repr = result_repr[:57] + "..."
-            lines.append(f"  ✓ Result ({result_type}): {result_repr}")
+            lines = [
+                f"ComputationResult: {self.var_name}",
+                f"  From request by: {self.sender}",
+                f"  Result ID: {self.var_id[:12]}...",
+                f"  Comp ID: {self.comp_id[:12]}...",
+            ]
 
-        if self.stdout:
-            lines.append(f"  📤 Stdout: {len(self.stdout)} chars")
-        if self.stderr:
-            lines.append(f"  ⚠️  Stderr: {len(self.stderr)} chars")
+            if self.error:
+                lines.append(f"  ❌ Error: {self.error}")
+            else:
+                result_type = type(self.result).__name__
+                result_repr = repr(self.result)
+                if len(result_repr) > 60:
+                    result_repr = result_repr[:57] + "..."
+                lines.append(f"  ✓ Result ({result_type}): {result_repr}")
 
-        lines.append("")
-        lines.append("  💡 Actions:")
-        lines.append("     .approve()           - Send result back")
-        lines.append("     .approve_with(value) - Send different value")
-        lines.append("     .data = new_value    - Modify before approving")
+            if self.stdout:
+                lines.append(f"  📤 Stdout: {len(self.stdout)} chars")
+            if self.stderr:
+                lines.append(f"  ⚠️  Stderr: {len(self.stderr)} chars")
 
-        return "\n".join(lines)
+            lines.append("")
+            lines.append("  💡 Actions:")
+            lines.append("     .approve()           - Send result back")
+            lines.append("     .reject(message)     - Reject with explanation")
+
+            return "\n".join(lines)
 
 
 @dataclass
@@ -140,6 +271,41 @@ class ComputationRequest:
     sender: str
     result_name: str
     created_at: str = field(default_factory=_iso_now)
+
+    def _auto_detect_context(self):
+        """Auto-detect BeaverContext from caller's scope."""
+        import inspect
+
+        # Try to find the expected user from remote var args
+        expected_user = None
+        for arg in self.args:
+            if isinstance(arg, dict) and arg.get("_beaver_remote_var"):
+                expected_user = arg["owner"]
+                break
+
+        # Walk up the frame stack to find a matching BeaverContext
+        frame = inspect.currentframe()
+        candidates = []
+        while frame and frame.f_back:
+            frame = frame.f_back
+            # Collect all BeaverContext objects
+            for scope in [frame.f_locals, frame.f_globals]:
+                for var_name, var_obj in scope.items():
+                    if (hasattr(var_obj, 'remote_vars') and
+                        hasattr(var_obj, 'user') and
+                        hasattr(var_obj, 'inbox_path')):
+                        candidates.append(var_obj)
+
+        # Prefer context that matches expected user, otherwise first found
+        if expected_user:
+            for candidate in candidates:
+                if candidate.user == expected_user:
+                    return candidate
+
+        if candidates:
+            return candidates[0]
+
+        return None
 
     def execute(self, context=None) -> dict:
         """
@@ -222,53 +388,251 @@ class ComputationRequest:
         )
 
     def run(self, context=None):
-        """Execute the computation (alias for execute)."""
-        return self.execute(context=context)
+        """
+        Execute the computation on real/private data only.
+
+        Returns ComputationResult where .data is a Twin with only private side.
+        If execution fails, returns ComputationResult with error (no Twin).
+        """
+        # Auto-detect context if needed
+        if context is None:
+            context = self._auto_detect_context()
+
+        comp_result = self.execute(context=context)
+
+        # Only wrap in Twin if execution succeeded
+        if comp_result.error is None and comp_result.result is not None:
+            from .twin import Twin
+            result_twin = Twin(
+                private=comp_result.result,
+                public=None,
+                owner=context.user if context else "unknown",
+                name=self.result_name
+            )
+            comp_result.result = result_twin
+
+        return comp_result
+
+    def run_mock(self, context=None):
+        """
+        Execute the computation on mock/public data for safe preview.
+
+        Returns ComputationResult where .data is a Twin with only public side.
+        """
+        from .twin import Twin
+
+        # Auto-detect context if needed
+        if context is None:
+            context = self._auto_detect_context()
+
+        # Replace Twin arguments with their public sides
+        mock_args = []
+        for arg in self.args:
+            if isinstance(arg, Twin):
+                if arg.has_public:
+                    mock_args.append(arg.public)
+                else:
+                    raise ValueError(f"Twin argument has no public data for mock testing")
+            else:
+                mock_args.append(arg)
+
+        mock_kwargs = {}
+        for k, v in self.kwargs.items():
+            if isinstance(v, Twin):
+                if v.has_public:
+                    mock_kwargs[k] = v.public
+                else:
+                    raise ValueError(f"Twin kwarg '{k}' has no public data for mock testing")
+            else:
+                mock_kwargs[k] = v
+
+        # Execute on mock data
+        print(f"🧪 Testing on mock/public data...")
+        mock_result = self.func(*mock_args, **mock_kwargs)
+        print(f"✓ Mock result: {type(mock_result).__name__}")
+
+        # Wrap in Twin with only public side
+        result_twin = Twin(
+            private=None,
+            public=mock_result,
+            owner=context.user if context else "unknown",
+            name=self.result_name
+        )
+
+        # Return ComputationResult
+        return ComputationResult(
+            result=result_twin,
+            stdout="",
+            stderr="",
+            error=None,
+            var_name=self.result_name,
+            var_id=self.result_id,
+            comp_id=self.comp_id,
+            sender=self.sender,
+            context=context,
+        )
+
+    def run_both(self, context=None):
+        """
+        Execute on both mock and real data.
+
+        Runs mock first, then real. Returns ComputationResult where .data is
+        a Twin with both sides for comparison.
+        """
+        from .twin import Twin
+
+        # Auto-detect context if needed
+        if context is None:
+            context = self._auto_detect_context()
+
+        # Run mock first
+        print(f"🧪 Step 1/2: Testing on mock/public data...")
+        mock_comp_result = self.run_mock(context=context)
+
+        # Then run on real data
+        print(f"🔒 Step 2/2: Executing on real/private data...")
+        comp_result = self.execute(context=context)
+
+        # Extract the mock data from the Twin returned by run_mock()
+        mock_data = mock_comp_result.result.public if isinstance(mock_comp_result.result, Twin) else mock_comp_result.result
+
+        # Create Twin with both sides
+        result_twin = Twin(
+            public=mock_data,
+            private=comp_result.result,
+            owner=context.user if context else "unknown",
+            name=self.result_name
+        )
+
+        # Update the ComputationResult's data field to be the Twin
+        comp_result.result = result_twin
+        return comp_result
 
     def __call__(self, context=None):
         """Allow calling the request directly."""
         return self.execute(context=context)
 
     def __repr__(self) -> str:
-        """String representation."""
-        lines = [
-            f"ComputationRequest: {self.result_name}",
-            f"  From: {self.sender}",
-            f"  Function: {self.func.__name__}",
-            f"  Comp ID: {self.comp_id[:12]}...",
-            f"  Result ID: {self.result_id[:12]}...",
-        ]
+        """String representation - beautiful Action display."""
+        lines = []
 
-        # Show args with remote var info
-        if self.args:
-            lines.append(f"  Args ({len(self.args)}):")
-            for i, arg in enumerate(self.args):
-                if isinstance(arg, dict) and arg.get("_beaver_remote_var"):
-                    lines.append(
-                        f"    [{i}] RemoteVar '{arg['name']}' from {arg['owner']} "
-                        f"(ID: {arg['var_id'][:8]}...)"
-                    )
-                else:
-                    arg_repr = repr(arg)
-                    if len(arg_repr) > 60:
-                        arg_repr = arg_repr[:57] + "..."
-                    lines.append(f"    [{i}] {arg_repr}")
+        # Header
+        lines.append("━" * 70)
+        lines.append(f"⚡ Action: {self.result_name}")
+        lines.append(f"   Request from: {self.sender}")
+        lines.append("━" * 70)
 
-        if self.kwargs:
-            lines.append(f"  Kwargs ({len(self.kwargs)}):")
-            for k, v in self.kwargs.items():
-                if isinstance(v, dict) and v.get("_beaver_remote_var"):
-                    lines.append(
-                        f"    {k}= RemoteVar '{v['name']}' from {v['owner']} "
-                        f"(ID: {v['var_id'][:8]}...)"
-                    )
-                else:
-                    v_repr = repr(v)
-                    if len(v_repr) > 60:
-                        v_repr = v_repr[:57] + "..."
-                    lines.append(f"    {k}= {v_repr}")
+        # Function info
+        lines.append("")
+        lines.append(f"📋 Function: \033[36m{self.func.__name__}\033[0m")
 
-        lines.append(f"  💡 Call .run() to execute")
+        # Bound Data section - show what data is bound to this action
+        has_data = False
+        data_lines = []
+
+        for i, arg in enumerate(self.args):
+            from .twin import Twin
+            if isinstance(arg, Twin) or (isinstance(arg, dict) and arg.get("_beaver_remote_var")):
+                has_data = True
+
+                if isinstance(arg, Twin):
+                    # Determine privacy level and color
+                    if arg.has_private and arg.has_public:
+                        privacy_badge = "\033[33m⚠️  REAL+MOCK\033[0m"
+                        indent_color = "\033[33m"  # Yellow
+                    elif arg.has_private:
+                        privacy_badge = "\033[31m🔒 PRIVATE\033[0m"
+                        indent_color = "\033[31m"  # Red
+                    elif arg.has_public:
+                        privacy_badge = "\033[32m🌍 PUBLIC\033[0m"
+                        indent_color = "\033[32m"  # Green
+                    else:
+                        privacy_badge = "\033[35m⏳ PENDING\033[0m"
+                        indent_color = "\033[35m"  # Purple
+
+                    # Extract underlying type from Twin[type]
+                    underlying_type = arg.var_type.replace("Twin[", "").replace("]", "") if arg.var_type.startswith("Twin[") else arg.var_type
+
+                    data_lines.append(f"  {indent_color}│\033[0m {privacy_badge}")
+                    data_lines.append(f"  {indent_color}│\033[0m   Parameter: \033[36m{arg.name or 'unnamed'}\033[0m")
+                    data_lines.append(f"  {indent_color}│\033[0m   Type: {underlying_type}")
+                    data_lines.append(f"  {indent_color}│\033[0m   Owner: {arg.owner}")
+
+                    if arg.has_public:
+                        data_lines.append(f"  {indent_color}│\033[0m   📊 Mock data available for testing")
+                    if arg.has_private:
+                        data_lines.append(f"  {indent_color}│\033[0m   🔐 Real data available (you own this)")
+
+                elif isinstance(arg, dict) and arg.get("_beaver_remote_var"):
+                    # RemoteVar reference
+                    var_type = arg.get('var_type', 'unknown')
+                    is_twin = var_type.startswith('Twin[')
+
+                    if is_twin:
+                        underlying_type = var_type.replace("Twin[", "").replace("]", "")
+                        privacy_badge = "\033[35m🔗 TWIN REF\033[0m"
+                        indent_color = "\033[35m"
+                    else:
+                        underlying_type = var_type
+                        privacy_badge = "\033[36m🔗 DATA REF\033[0m"
+                        indent_color = "\033[36m"
+
+                    data_lines.append(f"  {indent_color}│\033[0m {privacy_badge}")
+                    data_lines.append(f"  {indent_color}│\033[0m   Parameter: \033[36m{arg['name']}\033[0m")
+                    data_lines.append(f"  {indent_color}│\033[0m   Type: {underlying_type}")
+                    data_lines.append(f"  {indent_color}│\033[0m   Owner: {arg['owner']}")
+
+        # Check kwargs too
+        for k, v in self.kwargs.items():
+            from .twin import Twin
+            if isinstance(v, Twin) or (isinstance(v, dict) and v.get("_beaver_remote_var")):
+                has_data = True
+                # Similar logic for kwargs...
+
+        if has_data:
+            lines.append("")
+            lines.append("📦 Bound Data:")
+            lines.extend(data_lines)
+
+        # Static parameters
+        static_args = []
+        for i, arg in enumerate(self.args):
+            from .twin import Twin
+            if not isinstance(arg, Twin) and not (isinstance(arg, dict) and arg.get("_beaver_remote_var")):
+                arg_type = type(arg).__name__
+                arg_repr = repr(arg)
+                if len(arg_repr) > 50:
+                    arg_repr = arg_repr[:47] + "..."
+                static_args.append(f"  • arg[{i}]: {arg_type} = {arg_repr}")
+
+        static_kwargs = []
+        for k, v in self.kwargs.items():
+            from .twin import Twin
+            if not isinstance(v, Twin) and not (isinstance(v, dict) and v.get("_beaver_remote_var")):
+                v_type = type(v).__name__
+                v_repr = repr(v)
+                if len(v_repr) > 50:
+                    v_repr = v_repr[:47] + "..."
+                static_kwargs.append(f"  • {k}: {v_type} = {v_repr}")
+
+        if static_args or static_kwargs:
+            lines.append("")
+            lines.append("⚙️  Static Parameters:")
+            lines.extend(static_args)
+            lines.extend(static_kwargs)
+
+        # Actions
+        lines.append("")
+        lines.append("💡 Next Steps:")
+        lines.append("   .run_mock()   → Test on mock/public data (safe preview)")
+        lines.append("   .run()        → Execute on real/private data")
+        lines.append("   .run_both()   → Run on both mock & real for comparison")
+        lines.append("   .reject(msg)  → Decline this request")
+
+        lines.append("")
+        lines.append(f"🆔 IDs: comp={self.comp_id[:12]}... result={self.result_id[:12]}...")
+        lines.append("━" * 70)
+
         return "\n".join(lines)
 
 
@@ -504,7 +868,7 @@ def execute_remote_computation(
     """
 
     def resolve_arg(arg):
-        """Resolve remote var references to actual values."""
+        """Resolve remote var references and Twins to actual values."""
         # Check if this is a remote var reference dict
         if isinstance(arg, dict) and arg.get("_beaver_remote_var"):
             if context:
@@ -526,6 +890,33 @@ def execute_remote_computation(
                 raise ValueError(
                     f"Cannot resolve remote var reference without context"
                 )
+
+        # Check if this is a Twin - look it up in global Twin registry
+        from .twin import Twin, _TWIN_REGISTRY
+        if isinstance(arg, Twin):
+            if context:
+                # Try to find the owner's version of this Twin by (twin_id, owner)
+                twin_id = arg.twin_id
+                owner = arg.owner
+
+                # Check global Twin registry for the executing user's version
+                key = (twin_id, context.user)
+                if key in _TWIN_REGISTRY:
+                    registered_twin = _TWIN_REGISTRY[key]
+                    if registered_twin.has_private:
+                        return registered_twin
+
+                # Also check with arg's owner (in case it differs from context.user)
+                if owner != context.user:
+                    key = (twin_id, owner)
+                    if key in _TWIN_REGISTRY:
+                        registered_twin = _TWIN_REGISTRY[key]
+                        if registered_twin.has_private:
+                            return registered_twin
+
+            # Use the received Twin if no local version with private data found
+            return arg
+
         return arg
 
     # Resolve any remote var references in args/kwargs

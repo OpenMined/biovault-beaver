@@ -19,6 +19,74 @@ import pyfory
 from .envelope import BeaverEnvelope
 
 
+def _strip_ansi_codes(text: str) -> str:
+    """Remove ANSI color codes from text."""
+    # Pattern matches ANSI escape sequences like \033[31m (red) or \033[0m (reset)
+    ansi_pattern = re.compile(r'\033\[[0-9;]*m')
+    return ansi_pattern.sub('', text)
+
+
+def _get_var_name_from_caller(obj: Any, depth: int = 2) -> Optional[str]:
+    """
+    Try to extract the variable name from the caller's frame.
+
+    Args:
+        obj: The object being sent
+        depth: How many frames to go back (default 2: _get_var_name_from_caller -> send -> caller)
+
+    Returns:
+        Variable name if found, else None
+    """
+    try:
+        frame = inspect.currentframe()
+        for _ in range(depth):
+            if frame is None:
+                return None
+            frame = frame.f_back
+
+        if frame is None:
+            return None
+
+        # Get the calling line of code
+        import linecache
+        filename = frame.f_code.co_filename
+        lineno = frame.f_lineno
+        line = linecache.getline(filename, lineno).strip()
+
+        # Try to extract variable name from patterns like:
+        # bv.send(dataset, ...)
+        # result = bv.send(dataset, ...)
+        # my_var.request_private()
+        # my_var.request_private(context=bv)
+
+        # Match: .send(varname, ...) or .send(varname)
+        match = re.search(r'\.send\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*)', line)
+        if match:
+            var_name = match.group(1)
+            # Verify this variable exists in the caller's locals and references our object
+            if var_name in frame.f_locals:
+                if frame.f_locals[var_name] is obj:
+                    return var_name
+
+        # Match: varname.request_private(...) or varname.method()
+        match = re.search(r'([a-zA-Z_][a-zA-Z0-9_]*)\s*\.\s*\w+\s*\(', line)
+        if match:
+            var_name = match.group(1)
+            # Verify this variable exists in the caller's locals and references our object
+            if var_name in frame.f_locals:
+                if frame.f_locals[var_name] is obj:
+                    return var_name
+
+        # Fallback: check if obj has a __name__ attribute (functions, classes)
+        if hasattr(obj, '__name__'):
+            return obj.__name__
+
+    except Exception:
+        pass
+
+    return None
+
+
 def _summarize(obj: Any) -> dict:
     # Get the underlying function if it's a partial
     func = obj
@@ -53,6 +121,8 @@ def _summarize(obj: Any) -> dict:
         with contextlib.suppress(Exception):
             # Capture preview/repr for data envelopes
             preview = repr(obj)
+            # Strip ANSI color codes (e.g., from Twin objects)
+            preview = _strip_ansi_codes(preview)
             # Limit preview size to 500 chars
             if len(preview) > 500:
                 preview = preview[:497] + "..."
@@ -115,6 +185,32 @@ def _summarize(obj: Any) -> dict:
     return summary
 
 
+def _prepare_for_sending(obj: Any) -> Any:
+    """Prepare object for sending by stripping private data from Twins."""
+    from .twin import Twin
+
+    # Handle Twin objects by stripping private side
+    if isinstance(obj, Twin):
+        return Twin.public_only(
+            public=obj.public,
+            owner=obj.owner,
+            twin_id=obj.twin_id,
+            private_id=obj.private_id,
+            public_id=obj.public_id,
+            name=obj.name,
+        )
+
+    # Handle collections containing Twins
+    if isinstance(obj, dict):
+        return {k: _prepare_for_sending(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        result = [_prepare_for_sending(item) for item in obj]
+        return type(obj)(result)
+
+    # Return as-is for other types
+    return obj
+
+
 def pack(
     obj: Any,
     *,
@@ -129,8 +225,16 @@ def pack(
     policy=None,
 ) -> BeaverEnvelope:
     """Serialize an object into a BeaverEnvelope (Python-native)."""
+    # Strip private data from Twins before serialization
+    obj_to_send = _prepare_for_sending(obj)
+
     fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
-    payload = fory.dumps(obj)
+
+    # Register Twin type so it can be deserialized
+    from .twin import Twin
+    fory.register_type(Twin)
+
+    payload = fory.dumps(obj_to_send)
     manifest = _summarize(obj)
     manifest["size_bytes"] = len(payload)
     manifest["language"] = "python"
@@ -203,25 +307,113 @@ def unpack(
     """Deserialize the payload in a BeaverEnvelope."""
     _install_builtin_aliases()
     fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
+
+    # Register Twin type so it can be deserialized
+    from .twin import Twin
+    fory.register_type(Twin)
+
     return fory.loads(envelope.payload)
 
 
-def _inject(obj: Any, *, globals_ns: dict, name_hint: Optional[str]) -> None:
-    """Bind deserialized object into the provided namespace."""
-    if isinstance(obj, dict):
-        globals_ns.update(obj)
-        return
+def _check_overwrite(obj: Any, *, globals_ns: dict, name_hint: Optional[str]) -> bool:
+    """
+    Check if injecting would overwrite existing variables and prompt user.
+
+    Returns:
+        True if should proceed, False if user cancelled
+    """
+    # Determine what names would be used
     names = []
     if name_hint:
         names.append(name_hint)
+
+    obj_twin_name = getattr(obj, "name", None)
+    if obj_twin_name and obj_twin_name not in names:
+        names.append(obj_twin_name)
+
     obj_name = getattr(obj, "__name__", None)
     if obj_name:
         names.append(obj_name)
+
+    if not names:
+        names.append(type(obj).__name__)
+
+    unique_names = list(dict.fromkeys(names))
+
+    # Check which names already exist
+    existing = {}
+    for name in unique_names:
+        if name in globals_ns:
+            existing[name] = globals_ns[name]
+
+    if not existing:
+        # Nothing to overwrite
+        return True
+
+    # Show comparison
+    print("⚠️  WARNING: The following variables will be overwritten:")
+    print()
+
+    for name, current_obj in existing.items():
+        # Show current value
+        current_type = type(current_obj).__name__
+        current_repr = repr(current_obj)
+        if len(current_repr) > 60:
+            current_repr = current_repr[:57] + "..."
+
+        print(f"  Variable: {name}")
+        print(f"    Current:  {current_type} = {current_repr}")
+
+        # Show new value
+        new_type = type(obj).__name__
+        new_repr = repr(obj)
+        if len(new_repr) > 60:
+            new_repr = new_repr[:57] + "..."
+        print(f"    New:      {new_type} = {new_repr}")
+        print()
+
+    # Prompt for confirmation
+    try:
+        response = input("Overwrite? [y/N]: ").strip().lower()
+        return response in ('y', 'yes')
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+def _inject(obj: Any, *, globals_ns: dict, name_hint: Optional[str]) -> list[str]:
+    """
+    Bind deserialized object into the provided namespace.
+
+    Returns:
+        List of names used to inject the object
+    """
+    if isinstance(obj, dict):
+        globals_ns.update(obj)
+        return list(obj.keys())
+
+    names = []
+    if name_hint:
+        names.append(name_hint)
+
+    # For Twin objects, also try the Twin's .name attribute
+    obj_twin_name = getattr(obj, "name", None)
+    if obj_twin_name and obj_twin_name not in names:
+        names.append(obj_twin_name)
+
+    obj_name = getattr(obj, "__name__", None)
+    if obj_name:
+        names.append(obj_name)
+
     # Fallback to the type name if we have nothing else
     if not names:
         names.append(type(obj).__name__)
-    for n in dict.fromkeys(names):  # preserve order, drop duplicates
+
+    unique_names = list(dict.fromkeys(names))  # preserve order, drop duplicates
+    for n in unique_names:
         globals_ns[n] = obj
+
+    return unique_names
 
 
 def _next_file(inbox: Path | str) -> Optional[Path]:
@@ -530,6 +722,45 @@ class SendResult:
     def envelope_id(self) -> str:
         return self.envelope.envelope_id
 
+    def __repr__(self) -> str:
+        """Beautiful SendResult display."""
+        lines = []
+        lines.append("━" * 70)
+        lines.append(f"📤 Send Result")
+        lines.append("━" * 70)
+
+        # Extract recipient from path (e.g., shared/bob/file.beaver -> bob)
+        recipient = "unknown"
+        path_parts = self.path.parts
+        if len(path_parts) >= 2:
+            recipient = path_parts[-2]  # The directory before the filename
+
+        # Envelope info
+        lines.append(f"📧 Envelope ID: \033[36m{self.envelope.envelope_id[:16]}...\033[0m")
+        lines.append(f"📝 Name: \033[36m{self.envelope.name}\033[0m")
+        lines.append(f"👤 Sender: {self.envelope.sender} → \033[32mRecipient: {recipient}\033[0m")
+
+        # File path
+        lines.append(f"📁 File: \033[35m{self.path}\033[0m")
+
+        # Content type from manifest
+        obj_type = self.envelope.manifest.get("type", "Unknown")
+        envelope_type = self.envelope.manifest.get("envelope_type", "")
+
+        if envelope_type:
+            type_display = f"{obj_type} ({envelope_type})"
+        else:
+            type_display = obj_type
+
+        lines.append(f"📦 Type: {type_display}")
+
+        # Status
+        lines.append("")
+        lines.append(f"✅ Successfully sent to {recipient}'s inbox")
+        lines.append("━" * 70)
+
+        return "\n".join(lines)
+
 
 def export(
     *,
@@ -553,29 +784,43 @@ def export(
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            # Check if any arguments are RemoteVarPointers
+            # Check if any arguments are RemoteVarPointers or Twins
             from .remote_vars import RemoteVarPointer
-            from .computation import RemoteComputationPointer
+            from .computation import RemoteComputationPointer, ComputationRequest
+            from .twin import Twin
+            from uuid import uuid4
 
             has_remote_pointer = False
+            has_twin = False
             destination_user = None
+            twin_args = []
 
-            # Check args
+            # Check args for RemoteVarPointers and Twins
             for arg in args:
                 if isinstance(arg, RemoteVarPointer):
                     has_remote_pointer = True
                     destination_user = arg.remote_var.owner
                     break
+                elif isinstance(arg, Twin):
+                    has_twin = True
+                    twin_args.append(arg)
+                    if not destination_user:
+                        destination_user = arg.owner
 
             # Check kwargs
-            if not has_remote_pointer:
+            if not has_remote_pointer and not has_twin:
                 for arg in kwargs.values():
                     if isinstance(arg, RemoteVarPointer):
                         has_remote_pointer = True
                         destination_user = arg.remote_var.owner
                         break
+                    elif isinstance(arg, Twin):
+                        has_twin = True
+                        twin_args.append(arg)
+                        if not destination_user:
+                            destination_user = arg.owner
 
-            # If remote pointers detected, return computation pointer instead of executing
+            # If remote pointers detected, return computation pointer (legacy behavior)
             if has_remote_pointer:
                 comp = RemoteComputationPointer(
                     func=func,
@@ -587,7 +832,47 @@ def export(
                 )
                 return comp
 
-            # Normal execution if no remote pointers
+            # If Twins detected, return Twin result
+            if has_twin:
+                # Execute on public data immediately
+                public_args = tuple(
+                    arg.public if isinstance(arg, Twin) else arg
+                    for arg in args
+                )
+                public_kwargs = {
+                    k: v.public if isinstance(v, Twin) else v
+                    for k, v in kwargs.items()
+                }
+
+                try:
+                    public_result = func(*public_args, **public_kwargs)
+                except Exception as e:
+                    public_result = None
+                    print(f"⚠️  Public execution failed: {e}")
+
+                # Create ComputationRequest for private execution
+                comp_id = uuid4().hex
+                comp_request = ComputationRequest(
+                    comp_id=comp_id,
+                    result_id=uuid4().hex,
+                    func=func,
+                    args=args,
+                    kwargs=kwargs,
+                    sender=context.user if context else "unknown",
+                    result_name=name or f"{func.__name__}_result",
+                )
+
+                # Return Twin with public result and computation request
+                result_twin = Twin(
+                    public=public_result,
+                    private=comp_request,  # Computation request, not result yet
+                    owner=destination_user or "unknown",
+                    name=name or f"{func.__name__}_result",
+                )
+
+                return result_twin
+
+            # Normal execution if no remote pointers or twins
             return func(*args, **kwargs)
 
         class BoundFunction:
@@ -727,7 +1012,7 @@ class BeaverContext:
 
         # Remote vars setup
         self._base_dir = self.inbox_path.parent.parent  # shared/
-        self._public_dir = self._base_dir / "public"
+        self._public_dir = self._base_dir / "shared" / "public"
         self._registry_path = self._public_dir / self.user / "remote_vars.json"
         self._remote_vars_registry = None
 
@@ -854,7 +1139,7 @@ class BeaverContext:
                     obj = unpack(envelope, strict=self.strict, policy=self.policy)
 
                     # First, try to update the original computation pointer
-                    from .computation import _update_computation_pointer
+                    from .computation import _update_computation_pointer, _update_twin_result
 
                     updated = _update_computation_pointer(envelope.reply_to, obj)
 
@@ -862,7 +1147,11 @@ class BeaverContext:
                         print(f"✨ Auto-updated computation pointer!")
                         print(f"   Variable holding the pointer now has result")
                         print(f"   Access with .value or just print the variable")
-                    else:
+
+                    # Also try to update Twin results
+                    twin_updated = _update_twin_result(envelope.reply_to, obj)
+
+                    if not updated and not twin_updated:
                         # If no pointer found, inject into globals as before
                         # Get caller's globals (walk up to find __main__ or first non-beaver module)
                         target_globals = None
@@ -931,10 +1220,24 @@ class BeaverContext:
 
     def send(self, obj: Any, **kwargs) -> Path:
         """Pack and write an object using context defaults."""
+        # Priority for name:
+        # 1. Explicit name passed to send()
+        # 2. Object's .name attribute (e.g., Twin.name)
+        # 3. Auto-detected variable name
+        # 4. None
+        name = kwargs.get("name")
+        if name is None:
+            # Check if object has a .name attribute (like Twin)
+            if hasattr(obj, 'name') and obj.name:
+                name = obj.name
+            else:
+                # Auto-detect from caller's variable name
+                name = _get_var_name_from_caller(obj, depth=2)
+
         env = pack(
             obj,
             sender=kwargs.get("sender", self.user),
-            name=kwargs.get("name"),
+            name=name,
             inputs=kwargs.get("inputs"),
             outputs=kwargs.get("outputs"),
             requirements=kwargs.get("requirements"),
@@ -1009,7 +1312,7 @@ class BeaverContext:
     def inbox(
         self,
         sort_by: Optional[str] = "created_at",
-        reverse: bool = True,
+        reverse: bool = False,
         newest: bool = False,
         oldest: bool = False,
         by_name: bool = False,
@@ -1023,7 +1326,7 @@ class BeaverContext:
 
         Args:
             sort_by: Field to sort by (default: "created_at")
-            reverse: Reverse sort order (default: True for newest first)
+            reverse: Reverse sort order (default: False for oldest first)
             newest: Shorthand for newest first (created_at desc)
             oldest: Shorthand for oldest first (created_at asc)
             by_name: Sort by name alphabetically

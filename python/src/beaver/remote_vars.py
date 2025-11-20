@@ -106,6 +106,8 @@ class RemoteVarRegistry:
         """
         Add a variable to the registry (metadata only, no data sent).
 
+        For Twin objects, only the public side will be shared when accessed remotely.
+
         Args:
             obj: The Python object to register
             name: Variable name (auto-detected from caller if None)
@@ -130,19 +132,31 @@ class RemoteVarRegistry:
         if not name:
             name = "unnamed"
 
+        # Check if this is a Twin object
+        from .twin import Twin
+        is_twin = isinstance(obj, Twin)
+
         # Create metadata
         from .runtime import _summarize
 
-        summary = _summarize(obj)
-
-        # Store value for simple types
-        simple_types = (str, int, float, bool, type(None))
-        stored_value = obj if isinstance(obj, simple_types) else None
+        if is_twin:
+            # For Twin, summarize the public side
+            summary = _summarize(obj.public)
+            # Don't store Twin in registry - it will be sent separately
+            # The registry is just metadata
+            stored_value = None
+            var_type = f"Twin[{summary.get('type', 'unknown')}]"
+        else:
+            summary = _summarize(obj)
+            # Store value for simple types
+            simple_types = (str, int, float, bool, type(None))
+            stored_value = obj if isinstance(obj, simple_types) else None
+            var_type = summary.get("type", "unknown")
 
         remote_var = RemoteVar(
             name=name,
             owner=self.owner,
-            var_type=summary.get("type", "unknown"),
+            var_type=var_type,
             size_bytes=summary.get("size_bytes"),
             shape=summary.get("shape"),
             dtype=summary.get("dtype"),
@@ -152,6 +166,10 @@ class RemoteVarRegistry:
 
         self.vars[name] = remote_var
         self._save()
+
+        if is_twin:
+            print(f"🔒 Added Twin '{name}' (public side will be shared)")
+
         return remote_var
 
     def remove(self, name_or_id: str) -> bool:
@@ -412,41 +430,88 @@ class RemoteVarPointer:
 
     def load(self, *, inject: bool = True, as_name: Optional[str] = None):
         """
-        Load the remote variable pointer (or data if available).
+        Load the remote variable data.
 
-        For now, injects the pointer into globals so you can use it in code.
-        Eventually will load actual data on-demand.
+        For Twin types, requests and loads the public side from the owner.
+        For simple types, returns the stored value if available.
 
         Args:
             inject: Whether to inject into globals
             as_name: Name to use in globals (defaults to remote var name)
 
         Returns:
-            The pointer (or data when implemented)
+            The loaded object (Twin, simple value, or pointer if not available)
         """
         var_name = as_name or self.remote_var.name
 
-        if inject:
-            import inspect
+        # Check if this is a Twin type
+        is_twin = self.remote_var.var_type.startswith('Twin[')
 
-            # Get caller's globals
-            frame = inspect.currentframe()
-            if frame and frame.f_back:
-                caller_globals = frame.f_back.f_globals
-                # Inject the pointer into caller's globals
-                caller_globals[var_name] = self
-                print(f"✓ Injected pointer '{var_name}' into globals")
-                print(f"💡 Use {var_name} in your code - data will load on-demand (future)")
-            else:
-                print("⚠️  Could not inject into globals")
+        if is_twin:
+            # Request the Twin from the owner
+            # The owner should have already sent it if it's in their remote_vars
+            from .runtime import pack, write_envelope
+            from .twin import Twin
 
-        # For now, return the pointer
-        # Eventually this will trigger data loading
-        if not self.remote_var.data_location:
+            # Check if we already have the Twin in the context's remote_vars
+            # (it would have been sent when they published it)
+            if hasattr(self.view, 'context') and hasattr(self.view.context, 'remote_vars'):
+                for var in self.view.context.remote_vars.vars.values():
+                    if var.var_id == self.remote_var.var_id and var._stored_value is not None:
+                        if isinstance(var._stored_value, Twin):
+                            twin = var._stored_value
+                            if inject:
+                                import inspect
+                                frame = inspect.currentframe()
+                                if frame and frame.f_back:
+                                    caller_globals = frame.f_back.f_globals
+                                    caller_globals[var_name] = twin
+                                    print(f"✓ Loaded Twin '{var_name}' into globals")
+                            return twin
+
+            # Twin not found locally - need to request it
+            print(f"📍 Twin '{var_name}' metadata found, but data not yet sent")
+            print(f"💡 The owner needs to explicitly .send() this Twin")
+            print(f"💡 Or you can request access with: bv.peer('{self.remote_var.owner}').send_request('{var_name}')")
+
+            if inject:
+                import inspect
+                frame = inspect.currentframe()
+                if frame and frame.f_back:
+                    caller_globals = frame.f_back.f_globals
+                    # Inject the pointer for now
+                    caller_globals[var_name] = self
+                    print(f"✓ Injected pointer '{var_name}' into globals (will need actual data to use)")
+
+            return self
+
+        # For simple types, return stored value if available
+        elif self.remote_var._stored_value is not None:
+            value = self.remote_var._stored_value
+            if inject:
+                import inspect
+                frame = inspect.currentframe()
+                if frame and frame.f_back:
+                    caller_globals = frame.f_back.f_globals
+                    caller_globals[var_name] = value
+                    print(f"✓ Loaded '{var_name}' = {value}")
+            return value
+
+        # No data available
+        else:
+            if inject:
+                import inspect
+                frame = inspect.currentframe()
+                if frame and frame.f_back:
+                    caller_globals = frame.f_back.f_globals
+                    caller_globals[var_name] = self
+                    print(f"✓ Injected pointer '{var_name}' into globals")
+                    print(f"💡 Use {var_name} in your code - data will load on-demand (future)")
+
             print(f"📍 Pointer only - no data loaded yet")
-            print(f"💡 Future: will signal {self.remote_var.owner} to send data")
+            print(f"💡 Request data from {self.remote_var.owner}")
 
-        return self
+            return self
 
     def __repr__(self) -> str:
         return repr(self.remote_var)

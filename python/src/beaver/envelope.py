@@ -39,20 +39,49 @@ class BeaverEnvelope:
             name = self.envelope_id
         return f"{name}{suffix}"
 
-    def load(self, *, inject: bool = True, globals_ns: Optional[dict] = None, strict: bool = False, policy=None) -> Any:
-        """Load the envelope payload and inject into caller's globals."""
-        from .runtime import unpack, _inject
+    def load(self, *, inject: bool = True, overwrite: bool = True, globals_ns: Optional[dict] = None, strict: bool = False, policy=None) -> Any:
+        """
+        Load the envelope payload and inject into caller's globals.
+
+        Args:
+            inject: Whether to inject into globals
+            overwrite: If False, prompt before overwriting existing variables
+            globals_ns: Target namespace (auto-detected if None)
+            strict: Strict deserialization mode
+            policy: Deserialization policy
+        """
+        from .runtime import unpack, _inject, _check_overwrite
         import inspect
 
         obj = unpack(self, strict=strict, policy=policy)
 
         if inject:
             if globals_ns is None:
+                # Try to get caller's globals
                 frame = inspect.currentframe()
                 if frame and frame.f_back:
                     globals_ns = frame.f_back.f_globals
+
+                # Fallback for Jupyter notebooks
+                if globals_ns is None or '__IPYTHON__' in globals_ns:
+                    try:
+                        import __main__
+                        globals_ns = __main__.__dict__
+                    except ImportError:
+                        pass
+
             if globals_ns is not None:
-                _inject(obj, globals_ns=globals_ns, name_hint=self.name)
+                # Check for overwrites if needed
+                if not overwrite:
+                    should_proceed = _check_overwrite(obj, globals_ns=globals_ns, name_hint=self.name)
+                    if not should_proceed:
+                        print("⚠️  Load cancelled - no variables were overwritten")
+                        return obj
+
+                injected_names = _inject(obj, globals_ns=globals_ns, name_hint=self.name)
+                if injected_names:
+                    names_str = "', '".join(injected_names)
+                    print(f"✓ Loaded '{names_str}' into globals")
 
         return obj
 
@@ -106,9 +135,6 @@ class BeaverEnvelope:
             # Check if this is a ComputationRequest
             obj_type = self.manifest.get("type", "")
             if obj_type == "ComputationRequest":
-                # Show computation inputs
-                lines.append("")
-                lines.append("Inputs:")
                 # Try to load and inspect the computation
                 try:
                     from .runtime import unpack
@@ -130,32 +156,98 @@ class BeaverEnvelope:
                             if context:
                                 break
 
-                    for i, arg in enumerate(comp_req.args):
-                        if isinstance(arg, dict) and arg.get("_beaver_remote_var"):
-                            local_match = ""
-                            data_preview = ""
-                            if context and arg['owner'] == context.user:
-                                local_match = " [LOCAL]"
-                                # Try to get the actual value
-                                for var in context.remote_vars.vars.values():
-                                    if var.var_id == arg['var_id']:
-                                        if var._stored_value is not None:
-                                            val_repr = repr(var._stored_value)
-                                            if len(val_repr) > 40:
-                                                val_repr = val_repr[:37] + "..."
-                                            data_preview = f" = {val_repr}"
-                                        break
-                            lines.append(
-                                f"  [{i}] RemoteVar('{arg['name']}') "
-                                f"from {arg['owner']}{local_match}{data_preview}"
-                            )
-                        else:
-                            arg_repr = repr(arg)
-                            if len(arg_repr) > 60:
-                                arg_repr = arg_repr[:57] + "..."
-                            lines.append(f"  [{i}] {arg_repr}")
-                except Exception:
-                    lines.append("  (could not load inputs)")
+                    # Show arguments with detailed type info (similar to ComputationRequest.__repr__)
+                    if comp_req.args:
+                        lines.append("")
+                        lines.append(f"Arguments ({len(comp_req.args)}):")
+                        for i, arg in enumerate(comp_req.args):
+                            # Check if this is a RemoteVar/Twin reference
+                            if isinstance(arg, dict) and arg.get("_beaver_remote_var"):
+                                twin_type = arg.get('var_type', 'unknown')
+                                is_twin = twin_type.startswith('Twin[')
+
+                                if is_twin:
+                                    # Try to find the actual Twin to check privacy status
+                                    has_private = False
+                                    has_public = False
+                                    if context and arg['owner'] == context.user:
+                                        for var in context.remote_vars.vars.values():
+                                            if var.var_id == arg['var_id']:
+                                                from .twin import Twin
+                                                if isinstance(var._stored_value, Twin):
+                                                    has_private = var._stored_value.has_private
+                                                    has_public = var._stored_value.has_public
+                                                break
+
+                                    # Show Twin with privacy indicator
+                                    if has_private and has_public:
+                                        privacy = "⚠️  REAL + MOCK"
+                                    elif has_private:
+                                        privacy = "🔒 PRIVATE"
+                                    elif has_public:
+                                        privacy = "🌍 PUBLIC"
+                                    else:
+                                        privacy = "⏳ PENDING"
+
+                                    lines.append(
+                                        f"  [{i}] {privacy} Twin: {arg['name']} "
+                                        f"(type: {twin_type}, owner: {arg['owner']})"
+                                    )
+                                    if has_public:
+                                        lines.append(f"      📊 Mock data available for testing")
+                                    if has_private and context and arg['owner'] == context.user:
+                                        lines.append(f"      🔐 Real data available (you're the owner)")
+                                else:
+                                    # Regular RemoteVar
+                                    lines.append(
+                                        f"  [{i}] RemoteVar: {arg['name']} "
+                                        f"(type: {twin_type}, owner: {arg['owner']})"
+                                    )
+                            # Check if it's a Twin object directly (shouldn't happen but handle it)
+                            elif hasattr(arg, '__class__') and arg.__class__.__name__ == 'Twin':
+                                from .twin import Twin
+                                if isinstance(arg, Twin):
+                                    from .runtime import _strip_ansi_codes
+                                    # Twin should have been serialized, but handle it anyway
+                                    if arg.has_private and arg.has_public:
+                                        privacy = "⚠️  REAL + MOCK"
+                                    elif arg.has_private:
+                                        privacy = "🔒 PRIVATE"
+                                    elif arg.has_public:
+                                        privacy = "🌍 PUBLIC"
+                                    else:
+                                        privacy = "⏳ PENDING"
+                                    lines.append(
+                                        f"  [{i}] {privacy} Twin: {arg.name} "
+                                        f"(type: {arg.var_type}, owner: {arg.owner})"
+                                    )
+                            else:
+                                # Static bound value
+                                arg_type = type(arg).__name__
+                                from .runtime import _strip_ansi_codes
+                                arg_repr = _strip_ansi_codes(repr(arg))
+                                if len(arg_repr) > 60:
+                                    arg_repr = arg_repr[:57] + "..."
+                                lines.append(f"  [{i}] {arg_type}: {arg_repr}")
+                                lines.append(f"      📌 Static value (bound at call time)")
+
+                    # Show kwargs if any
+                    if comp_req.kwargs:
+                        lines.append("")
+                        lines.append(f"Keyword Arguments ({len(comp_req.kwargs)}):")
+                        for k, v in comp_req.kwargs.items():
+                            v_type = type(v).__name__
+                            from .runtime import _strip_ansi_codes
+                            v_repr = _strip_ansi_codes(repr(v))
+                            if len(v_repr) > 60:
+                                v_repr = v_repr[:57] + "..."
+                            lines.append(f"  {k}= {v_type}: {v_repr}")
+                            lines.append(f"      📌 Static value (bound at call time)")
+
+                except Exception as e:
+                    lines.append("")
+                    lines.append("Arguments:")
+                    lines.append(f"  (could not load: {e})")
 
             # Add signature info if available
             signature = self.manifest.get("signature")

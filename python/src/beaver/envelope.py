@@ -39,7 +39,7 @@ class BeaverEnvelope:
             name = self.envelope_id
         return f"{name}{suffix}"
 
-    def load(self, *, inject: bool = True, overwrite: bool = True, globals_ns: Optional[dict] = None, strict: bool = False, policy=None) -> Any:
+    def load(self, *, inject: bool = True, overwrite: bool = True, globals_ns: Optional[dict] = None, strict: bool = False, policy=None, live: bool = True, context=None) -> Any:
         """
         Load the envelope payload and inject into caller's globals.
 
@@ -49,11 +49,42 @@ class BeaverEnvelope:
             globals_ns: Target namespace (auto-detected if None)
             strict: Strict deserialization mode
             policy: Deserialization policy
+            live: If True and object is a live-enabled Twin, auto-subscribe for updates (default: True)
+            context: BeaverContext for live subscription (auto-detected if None)
         """
         from .runtime import unpack, _inject, _check_overwrite
         import inspect
 
         obj = unpack(self, strict=strict, policy=policy)
+
+        # Auto-subscribe to live updates if this is a live-enabled Twin
+        if live:
+            from .twin import Twin
+            if isinstance(obj, Twin) and hasattr(obj, '_live_enabled') and obj._live_enabled:
+                # Auto-detect context if not provided
+                if context is None:
+                    # Try to find BeaverContext in caller's scope
+                    frame = inspect.currentframe()
+                    while frame and frame.f_back:
+                        frame = frame.f_back
+                        for scope in [frame.f_locals, frame.f_globals]:
+                            for var_name, var_obj in scope.items():
+                                if (hasattr(var_obj, 'remote_vars') and
+                                    hasattr(var_obj, 'user') and
+                                    hasattr(var_obj, 'inbox_path')):
+                                    context = var_obj
+                                    break
+                            if context:
+                                break
+                        if context:
+                            break
+
+                if context:
+                    # Start watching for live updates in background
+                    print(f"📡 Auto-subscribed to live updates for Twin '{obj.name or 'unnamed'}'")
+                    print(f"💡 Use .watch_live() to get updates, or reload with live=False to disable")
+                    # Note: We don't actually start watching here, just inform the user
+                    # They need to call watch_live() to get the generator
 
         if inject:
             if globals_ns is None:

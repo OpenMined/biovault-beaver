@@ -91,6 +91,12 @@ class LiveMixin:
         self._live_interval = interval
         self._live_stop = False
 
+        # Also set dataclass fields for serialization (Twin only)
+        from .twin import Twin
+        if isinstance(self, Twin):
+            object.__setattr__(self, 'live_enabled', True)
+            object.__setattr__(self, 'live_interval', interval)
+
         # Start background sync thread
         self._live_thread = threading.Thread(
             target=self._live_sync_loop,
@@ -112,6 +118,11 @@ class LiveMixin:
 
         self._live_enabled = False
         self._live_stop = True
+
+        # Also update dataclass field for serialization (Twin only)
+        from .twin import Twin
+        if isinstance(self, Twin):
+            object.__setattr__(self, 'live_enabled', False)
 
         # Wait for thread to stop
         if self._live_thread and self._live_thread.is_alive():
@@ -217,38 +228,85 @@ class LiveMixin:
             return
 
         try:
-            # Get current value without triggering print messages
-            # For Twin objects, prefer public side for change detection since
-            # that's what gets sent to subscribers
-            if hasattr(self, 'public') and self.public is not None:
-                current_value = self.public
-            elif hasattr(self, 'private') and self.private is not None:
-                current_value = self.private
+            # Check if this is a subscriber (has source path) or owner (has private data)
+            from .twin import Twin
+            is_subscriber = (isinstance(self, Twin) and
+                           hasattr(self, '_source_path') and
+                           self._source_path is not None and
+                           self.private is None)
+
+            if is_subscriber:
+                # SUBSCRIBER MODE: Reload from source and detect changes
+                self._sync_as_subscriber()
             else:
-                # Fallback to get_value for other RemoteData types
-                current_value = self.get_value()
+                # OWNER MODE: Detect local changes and publish
+                self._sync_as_owner()
 
-            # Compute hash to detect changes
-            try:
-                current_hash = hash(str(current_value))
-            except TypeError:
-                # For unhashable types, use id
-                current_hash = id(current_value)
+        except Exception as e:
+            # Don't crash the sync thread
+            pass
 
-            # Check if changed
-            changed = (self._last_value_hash is not None and
-                      current_hash != self._last_value_hash)
+    def _sync_as_subscriber(self):
+        """Sync mode for subscribers - reload from source."""
+        from .twin import Twin
+        if not isinstance(self, Twin):
+            return
 
-            # Debug output
-            if hasattr(self, 'name'):
-                actual_public = getattr(self, 'public', 'N/A')
-                print(f"[LiveSync Debug] Twin '{self.name}': value={current_value}, actual_public={actual_public}, hash={current_hash}, last_hash={self._last_value_hash}, changed={changed}")
+        # Check if we have source tracking info
+        if not hasattr(self, '_source_path') or not self._source_path:
+            return
 
-            self._last_value_hash = current_hash
-            self._last_sync = _iso_now()
+        try:
+            from pathlib import Path
+            from .runtime import read_envelope
+            import json
 
-            # If changed, send updates to live subscribers
-            if changed:
+            # First, check if the source path has changed (owner updated)
+            # by reading the registry metadata
+            source_path = Path(self._source_path)
+
+            # Parse the owner and check their registry
+            # Format: shared/public/{owner}/data/{file}.beaver
+            parts = source_path.parts
+            if 'public' in parts and len(parts) >= 4:
+                owner_idx = parts.index('public') + 1
+                if owner_idx < len(parts):
+                    owner = parts[owner_idx]
+                    registry_path = source_path.parent.parent / "remote_vars.json"
+
+                    # Read registry to get latest data_location
+                    if registry_path.exists():
+                        with open(registry_path, 'r') as f:
+                            registry_data = json.load(f)
+                            # Registry is a dict with var names as keys
+                            if self.name in registry_data:
+                                var_data = registry_data[self.name]
+                                if var_data.get('var_type', '').startswith('Twin['):
+                                    # Update source path if it changed
+                                    new_location = var_data.get('data_location')
+                                    if new_location and new_location != str(source_path):
+                                        source_path = Path(new_location)
+                                        self._source_path = new_location
+
+            if not source_path.exists():
+                return
+
+            # Load the updated Twin
+            env = read_envelope(source_path)
+            updated_twin = env.load(inject=False)
+
+            if not isinstance(updated_twin, Twin):
+                return
+
+            # Check if value changed
+            old_value = self.public
+            new_value = updated_twin.public
+
+            # Update our public value if changed
+            if old_value != new_value:
+                object.__setattr__(self, 'public', new_value)
+                self._last_sync = _iso_now()
+
                 # Notify local callbacks
                 for callback in self._subscribers:
                     try:
@@ -256,14 +314,61 @@ class LiveMixin:
                     except Exception as e:
                         print(f"⚠️  Subscriber callback error: {e}")
 
-                # Send updates to remote subscribers (Twin only)
-                if hasattr(self, '_live_subscribers') and hasattr(self, '_live_context'):
-                    if self._live_subscribers and self._live_context:
-                        self._send_live_update()
-
-        except Exception as e:
-            # Don't crash the sync thread
+        except Exception:
+            # Don't crash on reload errors
             pass
+
+    def _sync_as_owner(self):
+        """Sync mode for owners - detect local changes and publish."""
+        # Get current value without triggering print messages
+        # For Twin objects, prefer public side for change detection since
+        # that's what gets sent to subscribers
+        if hasattr(self, 'public') and self.public is not None:
+            current_value = self.public
+        elif hasattr(self, 'private') and self.private is not None:
+            current_value = self.private
+        else:
+            # Fallback to get_value for other RemoteData types
+            current_value = self.get_value()
+
+        # Compute hash to detect changes
+        try:
+            current_hash = hash(str(current_value))
+        except TypeError:
+            # For unhashable types, use id
+            current_hash = id(current_value)
+
+        # Check if changed
+        changed = (self._last_value_hash is not None and
+                  current_hash != self._last_value_hash)
+
+        self._last_value_hash = current_hash
+        self._last_sync = _iso_now()
+
+        # If changed, send updates to live subscribers
+        if changed:
+            # Notify local callbacks
+            for callback in self._subscribers:
+                try:
+                    callback()
+                except Exception as e:
+                    print(f"⚠️  Subscriber callback error: {e}")
+
+            # Re-publish to public registry if this Twin is published
+            from .twin import Twin
+            if isinstance(self, Twin):
+                if hasattr(self, '_published_registry') and hasattr(self, '_published_name'):
+                    if self._published_registry and self._published_name:
+                        try:
+                            self._published_registry.update(self._published_name)
+                            print(f"  📢 Re-published to public registry")
+                        except Exception as e:
+                            print(f"  ⚠️  Failed to re-publish: {e}")
+
+            # Send updates to remote subscribers (Twin only)
+            if hasattr(self, '_live_subscribers') and hasattr(self, '_live_context'):
+                if self._live_subscribers and self._live_context:
+                    self._send_live_update()
 
     def _send_live_update(self):
         """Send Twin update to all live subscribers."""
@@ -296,16 +401,26 @@ class LiveMixin:
         """Generate live status lines for display."""
         lines = []
 
-        # Handle case where LiveMixin wasn't initialized (deserialized objects)
-        if not hasattr(self, '_live_enabled'):
-            lines.append(f"  Live: ⚫ Disabled")
-            return lines
+        # Check both runtime attribute and dataclass field (for deserialized Twins)
+        is_live = False
+        interval = 2.0
 
-        if self._live_enabled:
-            mode = "mutable" if self._live_mutable else "read-only"
-            lines.append(f"  Live: 🟢 Enabled ({mode}, {self._live_interval}s)")
-            if self._last_sync:
+        # First check runtime attribute (for active Twins)
+        if hasattr(self, '_live_enabled') and self._live_enabled:
+            is_live = True
+            interval = self._live_interval
+        # Fall back to dataclass field (for deserialized Twins)
+        elif hasattr(self, 'live_enabled') and self.live_enabled:
+            is_live = True
+            interval = self.live_interval
+
+        if is_live:
+            mode = "mutable" if getattr(self, '_live_mutable', False) else "read-only"
+            lines.append(f"  Live: 🟢 Enabled ({mode}, {interval}s)")
+            if hasattr(self, '_last_sync') and self._last_sync:
                 lines.append(f"  Last sync: {self._last_sync}")
+            else:
+                lines.append(f"  💡 Owner's Twin is live-syncing")
         else:
             lines.append(f"  Live: ⚫ Disabled")
 

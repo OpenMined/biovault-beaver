@@ -104,12 +104,15 @@ class RemoteVarRegistry:
 
     def add(self, obj: Any, name: Optional[str] = None) -> RemoteVar:
         """
-        Add a variable to the registry (metadata only, no data sent).
+        Publish a variable to the public registry.
 
-        For Twin objects, only the public side will be shared when accessed remotely.
+        For Twin objects, publishes the public side to a shared location
+        where others can load it without requiring explicit send().
+
+        For simple types, stores the value in the registry.
 
         Args:
-            obj: The Python object to register
+            obj: The Python object to publish
             name: Variable name (auto-detected from caller if None)
 
         Returns:
@@ -139,13 +142,52 @@ class RemoteVarRegistry:
         # Create metadata
         from .runtime import _summarize
 
+        data_location = None
+
         if is_twin:
-            # For Twin, summarize the public side
+            # For Twin, publish the public side to shared location
             summary = _summarize(obj.public)
-            # Don't store Twin in registry - it will be sent separately
-            # The registry is just metadata
-            stored_value = None
             var_type = f"Twin[{summary.get('type', 'unknown')}]"
+
+            # Write public Twin to shared data directory
+            from .runtime import pack, write_envelope
+
+            # Create a public-only Twin with live status preserved
+            live_enabled = hasattr(obj, '_live_enabled') and obj._live_enabled
+            live_interval = obj._live_interval if live_enabled else 2.0
+
+            public_twin = Twin.public_only(
+                public=obj.public,
+                owner=self.owner,
+                name=name,
+                twin_id=obj.twin_id,
+                public_id=obj.public_id,
+                live_enabled=live_enabled,
+                live_interval=live_interval
+            )
+
+            # Preserve runtime live status
+            if live_enabled:
+                public_twin._live_enabled = True
+                public_twin._live_mutable = obj._live_mutable
+                public_twin._live_interval = live_interval
+                public_twin._last_sync = getattr(obj, '_last_sync', None)
+
+            # Pack and write to public directory
+            env = pack(
+                public_twin,
+                sender=self.owner,
+                name=name,
+            )
+
+            # Write to public data directory: shared/public/{owner}/data/{name}.beaver
+            public_data_dir = self.registry_path.parent / "data"
+            public_data_dir.mkdir(parents=True, exist_ok=True)
+            data_path = write_envelope(env, out_dir=public_data_dir)
+            data_location = str(data_path)
+
+            stored_value = None  # Don't keep in memory
+
         else:
             summary = _summarize(obj)
             # Store value for simple types
@@ -161,6 +203,7 @@ class RemoteVarRegistry:
             shape=summary.get("shape"),
             dtype=summary.get("dtype"),
             envelope_type=summary.get("envelope_type", "unknown"),
+            data_location=data_location,
             _stored_value=stored_value,
         )
 
@@ -168,9 +211,81 @@ class RemoteVarRegistry:
         self._save()
 
         if is_twin:
-            print(f"🔒 Added Twin '{name}' (public side will be shared)")
+            print(f"📢 Published Twin '{name}' (public side available at: {data_location})")
+        elif stored_value is not None:
+            print(f"📢 Published '{name}' = {stored_value}")
+
+        # If this is a live-enabled Twin, store reference for auto-updates
+        if is_twin and hasattr(obj, '_live_enabled') and obj._live_enabled:
+            # Store the Twin object so we can re-publish on changes
+            remote_var._twin_reference = obj
+            # Store this registry on the Twin so it can call update()
+            obj._published_registry = self
+            obj._published_name = name
 
         return remote_var
+
+    def update(self, name: str):
+        """
+        Re-publish a Twin (e.g., after live sync detects changes).
+
+        Args:
+            name: Variable name to update
+        """
+        if name not in self.vars:
+            return
+
+        remote_var = self.vars[name]
+
+        # Only update if we have a Twin reference
+        if not hasattr(remote_var, '_twin_reference'):
+            return
+
+        twin = remote_var._twin_reference
+        if twin is None:
+            return
+
+        from .twin import Twin
+        from .runtime import pack, write_envelope
+
+        # Create updated public-only Twin with live status preserved
+        live_enabled = hasattr(twin, '_live_enabled') and twin._live_enabled
+        live_interval = twin._live_interval if live_enabled else 2.0
+
+        public_twin = Twin.public_only(
+            public=twin.public,
+            owner=self.owner,
+            name=name,
+            twin_id=twin.twin_id,
+            public_id=twin.public_id,
+            live_enabled=live_enabled,
+            live_interval=live_interval
+        )
+
+        # Preserve runtime live status
+        if live_enabled:
+            public_twin._live_enabled = True
+            public_twin._live_mutable = twin._live_mutable
+            public_twin._live_interval = live_interval
+            public_twin._last_sync = getattr(twin, '_last_sync', None)
+
+        # Pack and write to public directory
+        env = pack(
+            public_twin,
+            sender=self.owner,
+            name=name,
+        )
+
+        # Write to same location (overwrite)
+        public_data_dir = self.registry_path.parent / "data"
+        public_data_dir.mkdir(parents=True, exist_ok=True)
+        data_path = write_envelope(env, out_dir=public_data_dir)
+
+        # Update metadata
+        remote_var.data_location = str(data_path)
+        remote_var.updated_at = _iso_now()
+
+        self._save()
 
     def remove(self, name_or_id: str) -> bool:
         """
@@ -423,10 +538,88 @@ class RemoteVarView:
 class RemoteVarPointer:
     """
     Pointer to a specific remote variable that can be loaded on demand.
+
+    For Twin types, accessing attributes like .public will automatically
+    load the latest version from the inbox.
     """
 
     remote_var: RemoteVar
     view: RemoteVarView
+    _loaded_twin: Optional[Any] = field(default=None, init=False, repr=False)
+
+    def _auto_load_twin(self):
+        """Auto-load Twin from published location if this is a Twin type."""
+        # Check if already loaded
+        if self._loaded_twin is not None:
+            return self._loaded_twin
+
+        # Only auto-load for Twin types
+        if not self.remote_var.var_type.startswith('Twin['):
+            return None
+
+        from .twin import Twin
+
+        # First, try to load from published data location
+        if self.remote_var.data_location:
+            try:
+                from .runtime import read_envelope
+                from pathlib import Path
+
+                data_path = Path(self.remote_var.data_location)
+                if data_path.exists():
+                    env = read_envelope(data_path)
+                    twin = env.load(inject=False)
+                    if isinstance(twin, Twin):
+                        # Set source path for live sync reloading
+                        twin._source_path = str(data_path)
+
+                        # Auto-enable live sync if owner has it enabled
+                        if twin.live_enabled and not getattr(twin, '_live_enabled', False):
+                            twin.enable_live(interval=twin.live_interval)
+
+                        self._loaded_twin = twin
+                        return twin
+            except Exception:
+                # Fall through to inbox check
+                pass
+
+        # Fallback: check inbox for sent Twins
+        if not hasattr(self.view, 'context'):
+            return None
+
+        # Find the latest Twin with matching name from the remote user
+        latest_twin = None
+        for envelope in self.view.context.inbox():
+            if (envelope.name == self.remote_var.name and
+                envelope.sender == self.remote_var.owner):
+                # Load this Twin
+                twin = envelope.load(inject=False)
+                if isinstance(twin, Twin):
+                    latest_twin = twin
+                    # Keep looking for even newer ones
+
+        if latest_twin is not None:
+            self._loaded_twin = latest_twin
+            return latest_twin
+
+        return None
+
+    def __getattr__(self, name: str):
+        """
+        Auto-load Twin attributes like .public, .private, .value, etc.
+
+        This makes bv.remote.bob.counter.public work automatically.
+        """
+        # Try to auto-load the Twin
+        twin = self._auto_load_twin()
+
+        if twin is not None:
+            # Return the attribute from the loaded Twin
+            if hasattr(twin, name):
+                return getattr(twin, name)
+
+        # Fall back to default behavior
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def load(self, *, inject: bool = True, as_name: Optional[str] = None):
         """
@@ -448,12 +641,21 @@ class RemoteVarPointer:
         is_twin = self.remote_var.var_type.startswith('Twin[')
 
         if is_twin:
-            # Request the Twin from the owner
-            # The owner should have already sent it if it's in their remote_vars
-            from .runtime import pack, write_envelope
+            # Try to load from published data location first
             from .twin import Twin
 
-            # Check if we already have the Twin in the context's remote_vars
+            twin = self._auto_load_twin()
+            if twin is not None:
+                if inject:
+                    import inspect
+                    frame = inspect.currentframe()
+                    if frame and frame.f_back:
+                        caller_globals = frame.f_back.f_globals
+                        caller_globals[var_name] = twin
+                        print(f"✓ Loaded Twin '{var_name}' from published location")
+                return twin
+
+            # Fallback: Check if we already have the Twin in the context's remote_vars
             # (it would have been sent when they published it)
             if hasattr(self.view, 'context') and hasattr(self.view.context, 'remote_vars'):
                 for var in self.view.context.remote_vars.vars.values():

@@ -198,6 +198,8 @@ def _prepare_for_sending(obj: Any) -> Any:
             private_id=obj.private_id,
             public_id=obj.public_id,
             name=obj.name,
+            live_enabled=obj.live_enabled,
+            live_interval=obj.live_interval,
         )
 
     # Handle collections containing Twins
@@ -1010,6 +1012,10 @@ class BeaverContext:
         self.strict = strict
         self.policy = policy
 
+        # Settings
+        from .settings import BeaverSettings
+        self._settings = BeaverSettings()
+
         # Remote vars setup
         self._base_dir = self.inbox_path.parent.parent  # shared/
         self._public_dir = self._base_dir / "shared" / "public"
@@ -1029,6 +1035,16 @@ class BeaverContext:
         # Start auto-loading if enabled
         if auto_load_replies:
             self.start_auto_load()
+
+    @property
+    def settings(self):
+        """
+        Access configuration settings.
+
+        Returns:
+            BeaverSettings object for managing configuration
+        """
+        return self._settings
 
     @property
     def remote_vars(self):
@@ -1057,6 +1073,31 @@ class BeaverContext:
             UserRemoteVars helper object
         """
         return UserRemoteVars(username=username, context=self)
+
+    def workspace(self, **kwargs):
+        """
+        Get unified workspace view of shared data.
+
+        Shows all data/actions shared between users with status and history.
+
+        Args:
+            **kwargs: Filter options (user, status, item_type)
+
+        Returns:
+            WorkspaceView with filtering options
+
+        Examples:
+            bv.workspace()                    # All items
+            bv.workspace(user="bob")          # Only bob's items
+            bv.workspace(status="live")       # Only live items
+            bv.workspace(item_type="Twin")    # Only Twins
+        """
+        from .workspace import WorkspaceView
+
+        ws = WorkspaceView(self)
+        if kwargs:
+            return ws(**kwargs)
+        return ws
 
     @property
     def staged(self):

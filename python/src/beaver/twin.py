@@ -50,6 +50,10 @@ class Twin(LiveMixin, RemoteData):
     private: Optional[Any] = None  # Real data (only if you own it)
     public: Optional[Any] = None  # Mock/synthetic data (always available)
 
+    # Live sync metadata (survives serialization for display)
+    live_enabled: bool = False
+    live_interval: float = 2.0
+
     def __post_init__(self):
         """Initialize Twin and validate."""
         # Initialize LiveMixin
@@ -78,19 +82,22 @@ class Twin(LiveMixin, RemoteData):
         self._live_subscribers: list[str] = []  # List of usernames
         self._live_context = None  # BeaverContext for sending updates
 
+        # Source tracking for subscribers (where to reload from)
+        self._source_path: Optional[str] = None  # Path to reload published data from
+
         # Register in global registry if this Twin has private data
         if self.private is not None:
             key = (self.twin_id, self.owner)
             _TWIN_REGISTRY[key] = self
 
     @classmethod
-    def public_only(cls, public: Any, owner: str = "unknown", **kwargs):
+    def public_only(cls, public: Any, owner: str = "unknown", live_enabled: bool = False, live_interval: float = 2.0, **kwargs):
         """
         Create a Twin with only public data (no private).
 
         Used when receiving a Twin from remote.
         """
-        return cls(private=None, public=public, owner=owner, **kwargs)
+        return cls(private=None, public=public, owner=owner, live_enabled=live_enabled, live_interval=live_interval, **kwargs)
 
     # ===================================================================
     # RemoteData abstract method implementations
@@ -345,8 +352,8 @@ class Twin(LiveMixin, RemoteData):
         print(f"👁️  Watching for live updates to Twin '{self.name}'...")
         print(f"💡 Updates from '{self.owner}' will auto-reload")
 
-        # Track last value for change detection
-        last_hash = None
+        # Track seen envelope IDs to avoid re-processing
+        seen_envelope_ids = set()
         stop_watching = threading.Event()
 
         try:
@@ -357,6 +364,14 @@ class Twin(LiveMixin, RemoteData):
                         # Check if this is an update to our Twin
                         if (envelope.name == self.name and
                             envelope.sender == self.owner):
+
+                            # Skip if we've already processed this envelope
+                            if envelope.envelope_id in seen_envelope_ids:
+                                continue
+
+                            # Mark as seen
+                            seen_envelope_ids.add(envelope.envelope_id)
+
                             # Load the update
                             updated_twin = envelope.load(inject=False)
                             if isinstance(updated_twin, Twin):

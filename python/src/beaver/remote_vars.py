@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import importlib
+import importlib.metadata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +14,89 @@ from uuid import uuid4
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _detect_dependencies(obj: Any) -> Dict[str, str]:
+    """
+    Best-effort dependency detection for shared objects.
+
+    Captures key package versions so receivers know what to install to load.
+    """
+    deps: Dict[str, str] = {}
+
+    def add(pkg: str):
+        try:
+            deps[pkg] = importlib.metadata.version(pkg)
+        except importlib.metadata.PackageNotFoundError:
+            deps[pkg] = "unknown"
+
+    module = getattr(obj, "__module__", "") or ""
+    typename = type(obj).__name__
+
+    # AnnData
+    if module.startswith("anndata") or typename == "AnnData":
+        add("anndata")
+        # scanpy is typically used alongside AnnData
+        add("scanpy")
+    # Pandas
+    if module.startswith("pandas") or typename in {"DataFrame", "Series"}:
+        add("pandas")
+    # NumPy
+    if module.startswith("numpy") or typename == "ndarray":
+        add("numpy")
+
+    return deps
+
+
+class _SafeDisplayProxy:
+    """
+    Lightweight proxy that preserves the underlying object but guards repr/html.
+
+    Useful for objects like AnnData whose repr can be heavy or fragile.
+    Access the real object via ._raw if needed.
+    """
+
+    def __init__(self, obj: Any, label: Optional[str] = None):
+        self._raw = obj
+        self._label = label or type(obj).__name__
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw, name)
+
+    def __getitem__(self, key):
+        return self._raw[key]
+
+    def __iter__(self):
+        return iter(self._raw)
+
+    def __len__(self):
+        with contextlib.suppress(Exception):
+            return len(self._raw)
+        raise TypeError(f"{self._label} has no len()")
+
+    def __call__(self, *args, **kwargs):
+        return self._raw(*args, **kwargs)
+
+    def __repr__(self) -> str:
+        try:
+            # Lazy import to avoid cycles
+            from .twin import _safe_preview
+        except Exception:
+            _safe_preview = lambda v: repr(v)
+        preview = _safe_preview(self._raw)
+        return f"<{self._label} (preview): {preview} — real object at ._raw>"
+
+    def _repr_html_(self) -> str:
+        try:
+            from .twin import _safe_preview
+            preview = _safe_preview(self._raw)
+        except Exception:
+            preview = repr(self._raw)
+        return (
+            f"<b>{self._label}</b> (preview)<br>"
+            f"<code>{preview}</code><br>"
+            f"<i>Real object available at ._raw</i>"
+        )
 
 
 @dataclass
@@ -35,6 +120,7 @@ class RemoteVar:
     updated_at: str = field(default_factory=_iso_now)
     data_location: Optional[str] = None  # Path to actual .beaver file if sent
     _stored_value: Optional[Any] = None  # Actual value for simple types
+    deps: Dict[str, str] = field(default_factory=dict)  # dependency versions for loaders
 
     def __repr__(self) -> str:
         type_info = self.var_type
@@ -145,7 +231,9 @@ class RemoteVarRegistry:
         if is_twin:
             # For Twin, publish the public side to shared location
             summary = _summarize(obj.public)
-            var_type = f"Twin[{summary.get('type', 'unknown')}]"
+            # Prefer the Twin's own var_type (captures underlying data type)
+            var_type = getattr(obj, "var_type", f"Twin[{summary.get('type', 'unknown')}]")
+            deps = _detect_dependencies(obj.public)
 
             # Write public Twin to shared data directory
             from .runtime import pack, write_envelope
@@ -171,16 +259,18 @@ class RemoteVarRegistry:
                 public_twin._live_interval = live_interval
                 public_twin._last_sync = getattr(obj, "_last_sync", None)
 
+            public_data_dir = self.registry_path.parent / "data"
+            public_data_dir.mkdir(parents=True, exist_ok=True)
+
             # Pack and write to public directory
             env = pack(
                 public_twin,
                 sender=self.owner,
                 name=name,
+                artifact_dir=public_data_dir,
             )
 
             # Write to public data directory: shared/public/{owner}/data/{name}.beaver
-            public_data_dir = self.registry_path.parent / "data"
-            public_data_dir.mkdir(parents=True, exist_ok=True)
             data_path = write_envelope(env, out_dir=public_data_dir)
             data_location = str(data_path)
 
@@ -192,6 +282,7 @@ class RemoteVarRegistry:
             simple_types = (str, int, float, bool, type(None))
             stored_value = obj if isinstance(obj, simple_types) else None
             var_type = summary.get("type", "unknown")
+            deps = _detect_dependencies(obj)
 
         remote_var = RemoteVar(
             name=name,
@@ -203,6 +294,7 @@ class RemoteVarRegistry:
             envelope_type=summary.get("envelope_type", "unknown"),
             data_location=data_location,
             _stored_value=stored_value,
+            deps=deps,
         )
 
         self.vars[name] = remote_var
@@ -210,16 +302,15 @@ class RemoteVarRegistry:
 
         if is_twin:
             print(f"📢 Published Twin '{name}' (public side available at: {data_location})")
+            # Remember the Twin instance so remote computations can resolve to the owner's copy.
+            remote_var._twin_reference = obj
+            # If live sync is enabled, also keep registry metadata for auto-updates.
+            if hasattr(obj, "_live_enabled") and obj._live_enabled:
+                # Store this registry on the Twin so it can call update()
+                obj._published_registry = self
+                obj._published_name = name
         elif stored_value is not None:
             print(f"📢 Published '{name}' = {stored_value}")
-
-        # If this is a live-enabled Twin, store reference for auto-updates
-        if is_twin and hasattr(obj, "_live_enabled") and obj._live_enabled:
-            # Store the Twin object so we can re-publish on changes
-            remote_var._twin_reference = obj
-            # Store this registry on the Twin so it can call update()
-            obj._published_registry = self
-            obj._published_name = name
 
         return remote_var
 
@@ -541,12 +632,32 @@ class RemoteVarPointer:
     remote_var: RemoteVar
     view: RemoteVarView
     _loaded_twin: Optional[Any] = field(default=None, init=False, repr=False)
+    _last_error: Optional[Exception] = field(default=None, init=False, repr=False)
 
-    def _auto_load_twin(self):
-        """Auto-load Twin from published location if this is a Twin type."""
+    def _missing_deps(self) -> list[str]:
+        """
+        Compare declared dependencies against locally installed packages.
+        """
+        missing = []
+        for pkg, _ver in (self.remote_var.deps or {}).items():
+            try:
+                importlib.import_module(pkg)
+            except Exception:
+                missing.append(pkg)
+        return missing
+
+    def _auto_load_twin(self, *, auto_accept: bool = False):
+        """Auto-load Twin from published location if this is a Twin type.
+
+        Args:
+            auto_accept: If True, automatically accept trusted loaders without prompting
+        """
         # Check if already loaded
         if self._loaded_twin is not None:
             return self._loaded_twin
+        # Don't retry if we already failed - prevents infinite prompt loops
+        if self._last_error is not None:
+            return None
 
         # Only auto-load for Twin types
         if not self.remote_var.var_type.startswith("Twin["):
@@ -554,17 +665,64 @@ class RemoteVarPointer:
 
         from .twin import Twin
 
-        # First, try to load from published data location
+        # If the RemoteVar already holds a Twin value, use it directly
+        try:
+            from .twin import Twin
+
+            if isinstance(self.remote_var._stored_value, Twin):  # type: ignore[attr-defined]
+                self._loaded_twin = self.remote_var._stored_value  # type: ignore[attr-defined]
+                return self._loaded_twin
+        except Exception:
+            pass
+
+        # Try to load from published data location
         if self.remote_var.data_location:
             try:
-                from pathlib import Path
-
                 from .runtime import read_envelope
 
                 data_path = Path(self.remote_var.data_location)
+
+                # Try resolving relative to the registry's data dir if needed
+                if not data_path.exists() and hasattr(self.view, "registry_path"):
+                    candidate = Path(self.view.registry_path).parent / "data" / data_path.name
+                    if candidate.exists():
+                        data_path = candidate
+
+                if not data_path.exists() and hasattr(self.view, "data_dir"):
+                    candidate = Path(self.view.data_dir) / data_path.name
+                    if candidate.exists():
+                        data_path = candidate
+
+                # If still missing, try by name in the data directory
+                if not data_path.exists() and hasattr(self.view, "data_dir"):
+                    by_name = Path(self.view.data_dir) / f"{self.remote_var.name}.beaver"
+                    if by_name.exists():
+                        data_path = by_name
+
+                # If dependencies are declared, check availability before attempting load
+                if self.remote_var.deps:
+                    missing = self._missing_deps()
+                    if missing:
+                        self._last_error = (
+                            f"Missing dependencies: {', '.join(missing)} "
+                            f"required for '{self.remote_var.name}'"
+                        )
+                        return None
+
                 if data_path.exists():
                     env = read_envelope(data_path)
-                    twin = env.load(inject=False)
+                    twin = env.load(inject=False, auto_accept=auto_accept)
+                    if hasattr(twin, "public"):
+                        twin.public = _ensure_sparse_shapes(twin.public)
+                        # Swap public for a safe display proxy, keep raw on the side
+                        try:
+                            import anndata  # type: ignore
+
+                            if isinstance(twin.public, anndata.AnnData):
+                                twin._public_raw = twin.public
+                                twin.public = _SafeDisplayProxy(twin.public, label="AnnData")
+                        except Exception:
+                            pass
                     if isinstance(twin, Twin):
                         # Set source path for live sync reloading
                         twin._source_path = str(data_path)
@@ -575,7 +733,8 @@ class RemoteVarPointer:
 
                         self._loaded_twin = twin
                         return twin
-            except Exception:
+            except Exception as exc:
+                self._last_error = exc
                 # Fall through to inbox check
                 pass
 
@@ -609,12 +768,46 @@ class RemoteVarPointer:
         twin = self._auto_load_twin()
 
         if twin is not None and hasattr(twin, name):
-            return getattr(twin, name)
+            value = getattr(twin, name)
+            # Wrap AnnData-like objects to avoid heavy/fragile repr crashes
+            try:
+                import anndata  # type: ignore
 
-        # Fall back to default behavior
+                if isinstance(value, anndata.AnnData):
+                    value = _SafeDisplayProxy(value, label="AnnData")
+            except Exception:
+                # Best effort — if anndata not installed, just return the value
+                pass
+            return value
+
+        # If the Twin couldn't be loaded yet, but the caller is asking for .public/.private/.value,
+        # try one more time and give a helpful error (including dependency hints).
+        if name in {"public", "private", "value"}:
+            twin = self._auto_load_twin()
+            if twin is not None and hasattr(twin, name):
+                value = getattr(twin, name)
+                try:
+                    import anndata  # type: ignore
+
+                    if isinstance(value, anndata.AnnData):
+                        value = _SafeDisplayProxy(value, label="AnnData")
+                except Exception:
+                    pass
+                return value
+            msg = "Remote Twin data not available."
+            if getattr(self, "_last_error", None):
+                msg += f" Last load error: {self._last_error}"
+                if self.remote_var.deps:
+                    missing = self._missing_deps()
+                    if missing:
+                        msg += f" Missing: {', '.join(missing)}. Install and retry."
+            else:
+                msg += f" Ask the owner to publish/send '{self.remote_var.name}'."
+            raise AttributeError(msg)
+
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
-    def load(self, *, inject: bool = True, as_name: Optional[str] = None):
+    def load(self, *, inject: bool = True, as_name: Optional[str] = None, auto_accept: bool = False):
         """
         Load the remote variable data.
 
@@ -624,6 +817,7 @@ class RemoteVarPointer:
         Args:
             inject: Whether to inject into globals
             as_name: Name to use in globals (defaults to remote var name)
+            auto_accept: If True, automatically accept trusted loaders without prompting
 
         Returns:
             The loaded object (Twin, simple value, or pointer if not available)
@@ -637,7 +831,7 @@ class RemoteVarPointer:
             # Try to load from published data location first
             from .twin import Twin
 
-            twin = self._auto_load_twin()
+            twin = self._auto_load_twin(auto_accept=auto_accept)
             if twin is not None:
                 if inject:
                     import inspect
@@ -670,11 +864,22 @@ class RemoteVarPointer:
                         return twin
 
             # Twin not found locally - need to request it
-            print(f"📍 Twin '{var_name}' metadata found, but data not yet sent")
-            print("💡 The owner needs to explicitly .send() this Twin")
-            print(
-                f"💡 Or you can request access with: bv.peer('{self.remote_var.owner}').send_request('{var_name}')"
-            )
+            if self.remote_var.data_location:
+                if getattr(self, "_last_error", None):
+                    print(
+                        f"⚠️  Twin '{var_name}' published at {self.remote_var.data_location} "
+                        f"but could not be loaded: {self._last_error}"
+                    )
+                    print("💡 Install required dependencies (e.g., anndata/scanpy) and retry.")
+                else:
+                    print(f"📍 Twin '{var_name}' published but not yet loaded.")
+                    print("💡 Ensure published data is accessible and dependencies are installed.")
+            else:
+                print(f"📍 Twin '{var_name}' metadata found, but data not yet sent")
+                print("💡 The owner needs to explicitly .send() this Twin")
+                print(
+                    f"💡 Or you can request access with: bv.peer('{self.remote_var.owner}').send_request('{var_name}')"
+                )
 
             if inject:
                 import inspect
@@ -721,4 +926,56 @@ class RemoteVarPointer:
             return self
 
     def __repr__(self) -> str:
+        # Don't retry loading if we already have an error - avoids infinite prompt loops
+        if self._loaded_twin is not None:
+            return repr(self._loaded_twin)
+        if self._last_error is not None:
+            return repr(self.remote_var)
+        twin = self._auto_load_twin()
+        if twin is not None:
+            return repr(twin)
         return repr(self.remote_var)
+
+    def _repr_html_(self) -> str:
+        # Don't retry loading if we already have an error - avoids infinite prompt loops
+        if self._loaded_twin is not None:
+            twin = self._loaded_twin
+        elif self._last_error is not None:
+            twin = None
+        else:
+            twin = self._auto_load_twin()
+        if twin is not None and hasattr(twin, "_repr_html_"):
+            return twin._repr_html_()  # type: ignore[attr-defined]
+        return (
+            self.remote_var._repr_html_() if hasattr(self.remote_var, "_repr_html_") else repr(self)
+        )
+def _ensure_sparse_shapes(val: Any) -> Any:
+    """
+    Ensure scipy sparse matrices keep their shape metadata after deserialization.
+    """
+    try:
+        import scipy.sparse as sp
+    except Exception:
+        return val
+
+    def fix(obj):
+        if sp.issparse(obj) and not hasattr(obj, "_shape"):
+            obj._shape = obj.shape  # type: ignore[attr-defined]
+        return obj
+
+    # Top-level
+    fix(val)
+
+    # AnnData specific: fix X, layers, obsm/varm, obsp/varp
+    try:
+        import anndata  # type: ignore
+
+        if isinstance(val, anndata.AnnData):
+            fix(val.X)
+            for container in (val.layers, val.obsm, val.varm, val.obsp, val.varp):
+                for k in list(container.keys()):
+                    container[k] = fix(container[k])
+    except Exception:
+        pass
+
+    return val

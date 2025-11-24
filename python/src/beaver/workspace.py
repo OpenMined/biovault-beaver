@@ -82,6 +82,9 @@ class WorkspaceView:
         # Scan peer remote vars
         self._scan_peer_remote_vars()
 
+        # Scan sent items (outbox/other user inboxes)
+        self._scan_sent_items()
+
         # TODO: Scan outbox for sent items
         # TODO: Scan staged computations
 
@@ -229,6 +232,66 @@ class WorkspaceView:
             except Exception:
                 # Skip malformed registries
                 pass
+
+    def _scan_sent_items(self):
+        """Scan other users' inboxes for items we sent."""
+        base = self.context._base_dir
+        if not base.exists():
+            return
+
+        for user_dir in base.iterdir():
+            if not user_dir.is_dir():
+                continue
+            # Skip our own inbox and shared/public
+            if user_dir.name in {self.context.user, "shared"}:
+                continue
+
+            for path in sorted(user_dir.glob("*.beaver")):
+                with contextlib.suppress(Exception):
+                    data = json.loads(path.read_text())
+                    if data.get("sender") != self.context.user:
+                        continue
+
+                    name = data.get("name", "(unnamed)")
+                    envelope_id = data.get("envelope_id")
+                    created_at = data.get("created_at")
+                    manifest = data.get("manifest", {})
+                    item_type = manifest.get("type", "unknown")
+
+                    # Normalize Twin type
+                    underlying_type = None
+                    if "Twin" in item_type or item_type.startswith("Twin["):
+                        underlying_type = item_type.replace("Twin[", "").replace("]", "")
+                        item_type = "Twin"
+
+                    timestamp = None
+                    if created_at:
+                        with contextlib.suppress(Exception):
+                            timestamp = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+
+                    key = f"{self.context.user}:{name}"
+                    if key in self._items:
+                        # Update existing entry with fresher timestamp
+                        existing = self._items[key]
+                        if timestamp and (not existing.timestamp or timestamp > existing.timestamp):
+                            existing.timestamp = timestamp
+                            existing.envelope_id = envelope_id
+                            existing.status = "sent"
+                            existing.last_action = "Sent"
+                            if underlying_type:
+                                existing.underlying_type = underlying_type
+                        existing.version_count += 1
+                    else:
+                        self._items[key] = WorkspaceItem(
+                            name=name,
+                            owner=self.context.user,
+                            item_type=item_type,
+                            underlying_type=underlying_type,
+                            status="sent",
+                            last_action="Sent",
+                            timestamp=timestamp,
+                            envelope_id=envelope_id,
+                        )
 
     def __call__(
         self,
@@ -423,24 +486,24 @@ class WorkspaceView:
             status_str = f"{item.status_icon} {item.status.title()}"
 
             rows.append(
-                f"<tr>"
-                f"<td><b>{name_str}</b></td>"
-                f"<td>{item.owner}</td>"
-                f"<td><code>{type_str}</code></td>"
-                f"<td>{status_str}</td>"
-                f"<td>{last_action}</td>"
+                f"<tr style='background: #111; color: #eee; border-bottom: 1px solid #222; text-align: left;'>"
+                f"<td style='padding: 8px 12px; word-break: break-word;'><b>{name_str}</b></td>"
+                f"<td style='padding: 8px 12px;'>{item.owner}</td>"
+                f"<td style='padding: 8px 12px; font-family: monospace;'>{type_str}</td>"
+                f"<td style='padding: 8px 12px;'>{status_str}</td>"
+                f"<td style='padding: 8px 12px;'>{last_action}</td>"
                 f"</tr>"
             )
 
         return (
             f"<b>🗂️ Shared Workspace: {self.context.user}</b><br>"
-            f"<table style='border-collapse: collapse; width: 100%;'>"
-            f"<thead><tr style='background: #f0f0f0;'>"
-            f"<th style='padding: 8px; text-align: left;'>Name</th>"
-            f"<th style='padding: 8px; text-align: left;'>Owner</th>"
-            f"<th style='padding: 8px; text-align: left;'>Type</th>"
-            f"<th style='padding: 8px; text-align: left;'>Status</th>"
-            f"<th style='padding: 8px; text-align: left;'>Last Action</th>"
+            f"<table style='border-collapse: collapse; table-layout: fixed; width: 100%; background: #0d0d0d; color: #eee; border: 1px solid #333;'>"
+            f"<thead><tr style='background: #1d1d1d; color: #fafafa; text-align: left;'>"
+            f"<th style='padding: 10px 12px;'>Name</th>"
+            f"<th style='padding: 10px 12px;'>Owner</th>"
+            f"<th style='padding: 10px 12px;'>Type</th>"
+            f"<th style='padding: 10px 12px;'>Status</th>"
+            f"<th style='padding: 10px 12px;'>Last Action</th>"
             f"</tr></thead>"
             f"<tbody>{''.join(rows)}</tbody>"
             f"</table>"

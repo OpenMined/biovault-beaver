@@ -1,5 +1,15 @@
 """Lightweight notebook-to-notebook ferry for Python objects using Fory."""
 
+# Enable matplotlib inline mode by default in Jupyter/IPython
+try:
+    from IPython import get_ipython
+
+    ip = get_ipython()
+    if ip is not None:
+        ip.run_line_magic("matplotlib", "inline")
+except (ImportError, AttributeError):
+    pass
+
 from .computation import (
     ComputationRequest,
     ComputationResult,
@@ -19,6 +29,7 @@ from .runtime import (
     BeaverContext,
     InboxView,
     SendResult,
+    TrustedLoader,
     connect,
     export,
     find_by_id,
@@ -34,7 +45,7 @@ from .runtime import (
     wait_for_reply,
     write_envelope,
 )
-from .twin import Twin
+from .twin import CapturedFigure, Twin
 from .twin_result import TwinComputationResult
 
 __version__ = "0.1.23"
@@ -42,6 +53,7 @@ __all__ = [
     "BeaverEnvelope",
     "BeaverContext",
     "BeaverPolicy",
+    "CapturedFigure",
     "ComputationRequest",
     "ComputationResult",
     "PERMISSIVE_POLICY",
@@ -53,6 +65,7 @@ __all__ = [
     "RemoteVarView",
     "StagingArea",
     "SendResult",
+    "TrustedLoader",
     "Twin",
     "TwinComputationResult",
     "connect",

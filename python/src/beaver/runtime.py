@@ -7,16 +7,80 @@ import functools
 import inspect
 import json
 import re
+import tempfile
+import textwrap
 import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 from uuid import uuid4
 
-import pyfory
+try:
+    import pyfory
+except ImportError:
+    import pickle
+
+    # Minimal stub for environments without pyfory (tests/dev)
+    class _StubFory:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def register_type(self, *_args, **_kwargs):
+            return None
+
+        def dumps(self, obj):
+            return pickle.dumps(obj)
+
+        def loads(self, payload):
+            return pickle.loads(payload)
+
+    pyfory = types.SimpleNamespace(Fory=_StubFory)
 
 from .envelope import BeaverEnvelope
+
+
+class TrustedLoader:
+    """
+    Simple decorator-based trusted loader registry.
+
+    Usage:
+        @TrustedLoader.register(MyType)
+        def serializer(obj, path): ...
+
+        @TrustedLoader.register(MyType)
+        def deserializer(path): ...
+
+    The first decorator sets the serializer, the second sets the deserializer.
+    """
+
+    _handlers: Dict[type, Dict[str, Any]] = {}
+
+    @classmethod
+    def register(cls, typ: type, *, name: Optional[str] = None):
+        def deco(fn):
+            entry = cls._handlers.setdefault(
+                typ,
+                {
+                    "name": name or f"{typ.__module__}.{typ.__name__}",
+                    "serializer": None,
+                    "deserializer": None,
+                },
+            )
+            if entry["serializer"] is None:
+                entry["serializer"] = fn
+            else:
+                entry["deserializer"] = fn
+            return fn
+
+        return deco
+
+    @classmethod
+    def get(cls, typ: type) -> Optional[Dict[str, Any]]:
+        h = cls._handlers.get(typ)
+        if h and h.get("serializer") and h.get("deserializer"):
+            return h
+        return None
 
 
 def _strip_ansi_codes(text: str) -> str:
@@ -184,28 +248,278 @@ def _summarize(obj: Any) -> dict:
     return summary
 
 
-def _prepare_for_sending(obj: Any) -> Any:
-    """Prepare object for sending by stripping private data from Twins."""
+def _strip_non_serializable_attrs(twin):
+    """Remove non-serializable attributes (like matplotlib figures) from a Twin."""
+    # These attributes are added by @bv decorator for local display but can't be serialized
+    for attr in ("public_figures", "private_figures"):
+        if hasattr(twin, attr):
+            delattr(twin, attr)
+    return twin
+
+
+def _sanitize_for_serialization(obj: Any) -> Any:
+    """Recursively sanitize objects that can't be serialized by pyfory."""
+    if obj is None:
+        return None
+    if isinstance(obj, (str, int, float, bool, bytes)):
+        return obj
+
+    # Handle matplotlib Figure/Axes
+    try:
+        import matplotlib.figure
+        from matplotlib.axes import Axes
+
+        if isinstance(obj, matplotlib.figure.Figure):
+            import io
+
+            buf = io.BytesIO()
+            obj.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+            buf.seek(0)
+            return {"_beaver_figure": True, "png_bytes": buf.getvalue()}
+        if isinstance(obj, Axes):
+            if obj.figure:
+                import io
+
+                buf = io.BytesIO()
+                obj.figure.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+                buf.seek(0)
+                return {"_beaver_figure": True, "png_bytes": buf.getvalue()}
+            return {"_beaver_axes": True, "title": str(obj.get_title())}
+    except ImportError:
+        pass
+
+    # Handle numpy types
+    try:
+        import numpy as np
+
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist() if obj.size <= 10000 else {"_numpy_array": True, "shape": obj.shape}
+    except ImportError:
+        pass
+
+    # Handle pandas
+    try:
+        import pandas as pd
+
+        if isinstance(obj, pd.DataFrame):
+            return obj.to_dict(orient="list")
+        if isinstance(obj, pd.Series):
+            return obj.to_dict()
+    except ImportError:
+        pass
+
+    # Handle scipy sparse
+    try:
+        import scipy.sparse
+
+        if scipy.sparse.issparse(obj):
+            return (
+                obj.toarray().tolist()
+                if obj.nnz < 10000
+                else {"_sparse_matrix": True, "shape": obj.shape}
+            )
+    except ImportError:
+        pass
+
+    # Recursively handle collections
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_serialization(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_serialization(x) for x in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_for_serialization(x) for x in obj)
+
+    # Check for problematic objects
+    obj_type = type(obj)
+    type_name = f"{obj_type.__module__}.{obj_type.__name__}"
+    if "matplotlib" in type_name:
+        return {"_matplotlib_object": True, "type": type_name}
+    # Check if object lacks __dict__ (can't be serialized properly)
+    if not hasattr(obj, "__dict__"):
+        # Has __slots__ but might still be problematic
+        if hasattr(obj, "__slots__"):
+            slots = getattr(obj_type, "__slots__", ())
+            if not slots or (isinstance(slots, (list, tuple)) and len(slots) == 0):
+                # Empty slots - object has no data
+                return {"_unserializable": True, "type": type_name}
+        else:
+            return {"_unserializable": True, "type": type_name}
+    if any(mod in type_name for mod in ("scanpy", "anndata", "sklearn")):
+        return {"_complex_object": True, "type": type_name}
+    return obj
+
+
+def _prepare_for_sending(
+    obj: Any,
+    *,
+    artifact_dir: Optional[Path] = None,
+    name_hint: Optional[str] = None,
+    preserve_private: bool = False,
+) -> Any:
+    """Prepare object for sending by handling trusted loaders and optionally stripping private data.
+
+    Args:
+        obj: Object to prepare
+        artifact_dir: Directory for trusted loader artifacts
+        name_hint: Name hint for artifacts
+        preserve_private: If True, keep private data in Twins (for approved results)
+    """
     from .twin import Twin
 
-    # Handle Twin objects by stripping private side
-    if isinstance(obj, Twin):
-        return Twin.public_only(
-            public=obj.public,
-            owner=obj.owner,
-            twin_id=obj.twin_id,
-            private_id=obj.private_id,
-            public_id=obj.public_id,
-            name=obj.name,
-            live_enabled=obj.live_enabled,
-            live_interval=obj.live_interval,
+    # Trusted loader conversion (non-Twin)
+    tl = TrustedLoader.get(type(obj))
+    if tl:
+        target_dir = Path(artifact_dir) if artifact_dir else Path(tempfile.gettempdir())
+        target_dir.mkdir(parents=True, exist_ok=True)
+        base = name_hint or tl["name"].split(".")[-1] or "artifact"
+        path = target_dir / f"{base}.bin"
+        tl["serializer"](obj, path)
+        import inspect
+
+        src_lines = inspect.getsource(tl["deserializer"]).splitlines()
+        src_clean = "\n".join(
+            line for line in src_lines if not line.lstrip().startswith("@TrustedLoader")
         )
+        src_clean = textwrap.dedent(src_clean)
+        return {
+            "_trusted_loader": True,
+            "name": tl["name"],
+            "path": str(path),
+            "deserializer_src": src_clean,
+        }
+
+    # Handle Twin objects
+    if isinstance(obj, Twin):
+        public_obj = obj.public
+        private_obj = obj.private if preserve_private else None
+
+        # Apply trusted loader to public side if available
+        tl_pub = TrustedLoader.get(type(public_obj)) if public_obj is not None else None
+        if tl_pub:
+            target_dir = Path(artifact_dir) if artifact_dir else Path(tempfile.gettempdir())
+            target_dir.mkdir(parents=True, exist_ok=True)
+            base = name_hint or getattr(public_obj, "name", None) or "artifact"
+            path = target_dir / f"{base}_public.bin"
+            tl_pub["serializer"](public_obj, path)
+            import inspect
+
+            src_lines = inspect.getsource(tl_pub["deserializer"]).splitlines()
+            src_clean = "\n".join(
+                line for line in src_lines if not line.lstrip().startswith("@TrustedLoader")
+            )
+            src_clean = textwrap.dedent(src_clean)
+            public_obj = {
+                "_trusted_loader": True,
+                "name": tl_pub["name"],
+                "path": str(path),
+                "deserializer_src": src_clean,
+            }
+
+        # Apply trusted loader to private side if preserving and available
+        if preserve_private and private_obj is not None:
+            tl_priv = TrustedLoader.get(type(private_obj))
+            if tl_priv:
+                target_dir = Path(artifact_dir) if artifact_dir else Path(tempfile.gettempdir())
+                target_dir.mkdir(parents=True, exist_ok=True)
+                base = name_hint or getattr(private_obj, "name", None) or "artifact"
+                path = target_dir / f"{base}_private.bin"
+                tl_priv["serializer"](private_obj, path)
+                import inspect
+
+                src_lines = inspect.getsource(tl_priv["deserializer"]).splitlines()
+                src_clean = "\n".join(
+                    line for line in src_lines if not line.lstrip().startswith("@TrustedLoader")
+                )
+                src_clean = textwrap.dedent(src_clean)
+                private_obj = {
+                    "_trusted_loader": True,
+                    "name": tl_priv["name"],
+                    "path": str(path),
+                    "deserializer_src": src_clean,
+                }
+
+        # Sanitize values before creating Twin to avoid serialization issues
+        # Skip if already a trusted loader dict
+        if public_obj is not None and not (
+            isinstance(public_obj, dict) and public_obj.get("_trusted_loader")
+        ):
+            public_obj = _sanitize_for_serialization(public_obj)
+        if private_obj is not None and not (
+            isinstance(private_obj, dict) and private_obj.get("_trusted_loader")
+        ):
+            private_obj = _sanitize_for_serialization(private_obj)
+
+        # Create new Twin (with or without private)
+        if preserve_private and private_obj is not None:
+            new_twin = Twin(
+                public=public_obj,
+                private=private_obj,
+                owner=obj.owner,
+                twin_id=obj.twin_id,
+                private_id=obj.private_id,
+                public_id=obj.public_id,
+                name=obj.name,
+                live_enabled=obj.live_enabled,
+                live_interval=obj.live_interval,
+            )
+        else:
+            new_twin = Twin.public_only(
+                public=public_obj,
+                owner=obj.owner,
+                twin_id=obj.twin_id,
+                private_id=obj.private_id,
+                public_id=obj.public_id,
+                name=obj.name,
+                live_enabled=obj.live_enabled,
+                live_interval=obj.live_interval,
+            )
+
+        # Copy serializable captured outputs
+        for attr in ("public_stdout", "public_stderr", "private_stdout", "private_stderr"):
+            if hasattr(obj, attr):
+                setattr(new_twin, attr, getattr(obj, attr))
+
+        # Convert captured figures to serializable format (dicts with PNG bytes)
+        def convert_figures_for_sending(figs):
+            """Convert CapturedFigure objects to serializable dicts."""
+            if not figs:
+                return None
+            result = []
+            for fig_item in figs:
+                if hasattr(fig_item, "png_bytes"):
+                    # CapturedFigure - extract PNG bytes
+                    result.append({"_beaver_figure": True, "png_bytes": fig_item.png_bytes})
+                elif isinstance(fig_item, dict) and fig_item.get("_beaver_figure"):
+                    # Already a dict, keep as-is
+                    result.append(fig_item)
+            return result if result else None
+
+        if hasattr(obj, "public_figures") and obj.public_figures:
+            new_twin.public_figures = convert_figures_for_sending(obj.public_figures)
+        if hasattr(obj, "private_figures") and obj.private_figures:
+            new_twin.private_figures = convert_figures_for_sending(obj.private_figures)
+
+        return new_twin
 
     # Handle collections containing Twins
     if isinstance(obj, dict):
-        return {k: _prepare_for_sending(v) for k, v in obj.items()}
+        return {
+            k: _prepare_for_sending(
+                v, artifact_dir=artifact_dir, name_hint=k, preserve_private=preserve_private
+            )
+            for k, v in obj.items()
+        }
     if isinstance(obj, (list, tuple)):
-        result = [_prepare_for_sending(item) for item in obj]
+        result = [
+            _prepare_for_sending(item, artifact_dir=artifact_dir, preserve_private=preserve_private)
+            for item in obj
+        ]
         return type(obj)(result)
 
     # Return as-is for other types
@@ -224,10 +538,18 @@ def pack(
     reply_to: Optional[str] = None,
     strict: bool = False,
     policy=None,
+    artifact_dir: Optional[Path | str] = None,
+    preserve_private: bool = False,
 ) -> BeaverEnvelope:
-    """Serialize an object into a BeaverEnvelope (Python-native)."""
-    # Strip private data from Twins before serialization
-    obj_to_send = _prepare_for_sending(obj)
+    """Serialize an object into a BeaverEnvelope (Python-native).
+
+    Args:
+        preserve_private: If True, include private data in Twins (for approved results)
+    """
+    # Prepare for sending (optionally strip private data)
+    obj_to_send = _prepare_for_sending(
+        obj, artifact_dir=artifact_dir, name_hint=name, preserve_private=preserve_private
+    )
 
     fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
 
@@ -305,8 +627,16 @@ def unpack(
     *,
     strict: bool = False,
     policy=None,
+    auto_accept: bool = False,
 ) -> Any:
-    """Deserialize the payload in a BeaverEnvelope."""
+    """Deserialize the payload in a BeaverEnvelope.
+
+    Args:
+        envelope: The envelope to unpack
+        strict: Strict deserialization mode
+        policy: Deserialization policy
+        auto_accept: If True, automatically accept trusted loaders without prompting
+    """
     _install_builtin_aliases()
     fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
 
@@ -315,7 +645,127 @@ def unpack(
 
     fory.register_type(Twin)
 
-    return fory.loads(envelope.payload)
+    obj = fory.loads(envelope.payload)
+    obj = _resolve_trusted_loader(obj, auto_accept=auto_accept)
+    return obj
+
+
+def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False) -> Any:
+    """
+    Resolve trusted-loader descriptors, prompting before execution.
+
+    Also unwraps _beaver_figure dicts back to CapturedFigure for nice display.
+
+    Args:
+        obj: The object to resolve
+        auto_accept: If True, automatically accept trusted loaders without prompting
+    """
+    try:
+        from .twin import CapturedFigure, Twin  # local import to avoid cycles
+
+        twin_cls = Twin
+        captured_figure_cls = CapturedFigure
+    except Exception:
+        twin_cls = None  # type: ignore
+        captured_figure_cls = None  # type: ignore
+
+    if twin_cls is not None and isinstance(obj, twin_cls):
+        obj.public = _resolve_trusted_loader(obj.public, auto_accept=auto_accept)
+        obj.private = _resolve_trusted_loader(obj.private, auto_accept=auto_accept)
+        # Also resolve captured figure lists (they contain _beaver_figure dicts)
+        if hasattr(obj, "public_figures") and obj.public_figures:
+            obj.public_figures = _resolve_trusted_loader(
+                obj.public_figures, auto_accept=auto_accept
+            )
+        if hasattr(obj, "private_figures") and obj.private_figures:
+            obj.private_figures = _resolve_trusted_loader(
+                obj.private_figures, auto_accept=auto_accept
+            )
+        return obj
+
+    # Unwrap _beaver_figure dicts back to CapturedFigure for nice Jupyter display
+    if isinstance(obj, dict) and obj.get("_beaver_figure") and captured_figure_cls is not None:
+        return captured_figure_cls(obj)
+
+    if isinstance(obj, dict) and obj.get("_trusted_loader"):
+        name = obj.get("name")
+        data_path = obj.get("path")
+        src = obj.get("deserializer_src", "")
+        preview = "\n".join(src.strip().splitlines()[:5])
+        if not auto_accept:
+            resp = (
+                input(
+                    f"Execute trusted loader '{name}'? [y/N]:\n{preview}\nSource: {data_path}\nProceed? "
+                )
+                .strip()
+                .lower()
+            )
+            if resp not in ("y", "yes"):
+                raise RuntimeError("Loader not approved")
+        # Build scope with common imports that deserializers might need
+        scope: Dict[str, Any] = {"TrustedLoader": TrustedLoader}
+        # Try to import anndata (common for AnnData loaders)
+        try:
+            import anndata as ad
+
+            scope["ad"] = ad
+            scope["anndata"] = ad
+        except ImportError:
+            pass
+        # Try to import pandas (common for DataFrame loaders)
+        try:
+            import pandas as pd
+
+            scope["pd"] = pd
+            scope["pandas"] = pd
+        except ImportError:
+            pass
+        # Try to import numpy (common dependency)
+        try:
+            import numpy as np
+
+            scope["np"] = np
+            scope["numpy"] = np
+        except ImportError:
+            pass
+        exec(src, scope, scope)
+        # Exclude TrustedLoader class and imported modules - we want the actual deserializer function
+        excluded = {
+            TrustedLoader,
+            scope.get("ad"),
+            scope.get("pd"),
+            scope.get("np"),
+            scope.get("anndata"),
+            scope.get("pandas"),
+            scope.get("numpy"),
+        }
+        deser_fn = next((v for v in scope.values() if callable(v) and v not in excluded), None)
+        if deser_fn is None:
+            raise RuntimeError("No deserializer found in loader source")
+        return deser_fn(data_path)
+
+    if isinstance(obj, list):
+        return [_resolve_trusted_loader(x, auto_accept=auto_accept) for x in obj]
+    if isinstance(obj, tuple):
+        return tuple(_resolve_trusted_loader(x, auto_accept=auto_accept) for x in obj)
+    if isinstance(obj, dict):
+        return {k: _resolve_trusted_loader(v, auto_accept=auto_accept) for k, v in obj.items()}
+    return obj
+
+
+def can_send(obj: Any, *, strict: bool = False, policy=None) -> tuple[bool, str]:
+    """
+    Dry-run serialization/deserialization to test sendability.
+
+    Uses auto_accept=True since this is testing your own data - no need to
+    prompt for trusted loader approval on a dry-run test.
+    """
+    try:
+        env = pack(obj, strict=strict, policy=policy)
+        _ = unpack(env, strict=strict, policy=policy, auto_accept=True)
+        return True, f"ok: {type(obj).__name__} serializes"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{exc.__class__.__name__}: {exc}"
 
 
 def _check_overwrite(obj: Any, *, globals_ns: dict, name_hint: Optional[str]) -> bool:
@@ -827,17 +1277,161 @@ def export(
 
             # If Twins detected, return Twin result
             if has_twin:
-                # Execute on public data immediately
-                public_args = tuple(arg.public if isinstance(arg, Twin) else arg for arg in args)
+                # Execute on public data immediately with output capture
+                from .remote_vars import _ensure_sparse_shapes, _SafeDisplayProxy
+
+                def unwrap_for_computation(val):
+                    """Unwrap display proxies and ensure sparse shapes."""
+                    if isinstance(val, _SafeDisplayProxy):
+                        val = val._raw
+                    return _ensure_sparse_shapes(val)
+
+                public_args = tuple(
+                    unwrap_for_computation(arg.public) if isinstance(arg, Twin) else arg
+                    for arg in args
+                )
                 public_kwargs = {
-                    k: v.public if isinstance(v, Twin) else v for k, v in kwargs.items()
+                    k: unwrap_for_computation(v.public) if isinstance(v, Twin) else v
+                    for k, v in kwargs.items()
                 }
 
+                # Capture stdout, stderr, and matplotlib figures
+                import io
+                from contextlib import redirect_stderr, redirect_stdout
+
+                stdout_capture = io.StringIO()
+                stderr_capture = io.StringIO()
+                captured_figures = []
+
+                # Try to capture matplotlib figures
                 try:
-                    public_result = func(*public_args, **public_kwargs)
+                    import matplotlib
+                    import matplotlib.pyplot as plt
+
+                    from .twin import CapturedFigure
+
+                    # Store existing figure numbers to know which are new
+                    existing_figs = set(plt.get_fignums())
+
+                    # Use non-interactive backend temporarily to prevent auto-display
+                    original_backend = matplotlib.get_backend()
+                    with contextlib.suppress(Exception):
+                        # Agg is a non-interactive backend that won't display
+                        matplotlib.use("Agg", force=True)
+
+                    has_matplotlib = True
+
+                    # Hook plt.show() to capture figures BEFORE they're closed
+                    original_show = plt.show
+
+                    def capturing_show(*_args, **_kwargs):
+                        """Capture all current figures when show() is called."""
+                        nonlocal captured_figures
+                        for fig_num in plt.get_fignums():
+                            if fig_num not in existing_figs:
+                                fig = plt.figure(fig_num)
+                                buf = io.BytesIO()
+                                try:
+                                    fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+                                    buf.seek(0)
+                                    captured_figures.append(
+                                        CapturedFigure(
+                                            {
+                                                "figure": None,
+                                                "png_bytes": buf.getvalue(),
+                                            }
+                                        )
+                                    )
+                                except Exception:
+                                    pass
+                        # Don't call original show - we're in Agg backend
+
+                    plt.show = capturing_show
+
+                except ImportError:
+                    has_matplotlib = False
+                    existing_figs = set()
+
+                try:
+                    with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                        public_result = func(*public_args, **public_kwargs)
+
+                    # Capture any remaining matplotlib figures and restore show
+                    if has_matplotlib:
+                        from .twin import CapturedFigure
+
+                        plt.show = original_show
+
+                        # Collect figures to capture: new figures AND figures from returned Axes
+                        figures_to_capture = set()
+
+                        # Add any new figures
+                        new_figs = set(plt.get_fignums()) - existing_figs
+                        for fig_num in new_figs:
+                            figures_to_capture.add(plt.figure(fig_num))
+
+                        # Also check if result contains Axes - if so, capture their figures
+                        def extract_axes_figures(obj):
+                            """Extract parent figures from Axes objects in result."""
+                            figs = set()
+                            try:
+                                from matplotlib.axes import Axes
+
+                                if isinstance(obj, Axes):
+                                    if obj.figure and obj.figure.number not in existing_figs:
+                                        figs.add(obj.figure)
+                                elif isinstance(obj, (list, tuple)):
+                                    for item in obj:
+                                        figs.update(extract_axes_figures(item))
+                                elif isinstance(obj, dict):
+                                    for item in obj.values():
+                                        figs.update(extract_axes_figures(item))
+                            except Exception:
+                                pass
+                            return figs
+
+                        figures_to_capture.update(extract_axes_figures(public_result))
+
+                        # Capture all unique figures
+                        captured_fig_ids = set()
+                        for fig in figures_to_capture:
+                            if id(fig) in captured_fig_ids:
+                                continue
+                            captured_fig_ids.add(id(fig))
+                            buf = io.BytesIO()
+                            try:
+                                fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+                                buf.seek(0)
+                                captured_figures.append(
+                                    CapturedFigure(
+                                        {
+                                            "figure": fig,
+                                            "png_bytes": buf.getvalue(),
+                                        }
+                                    )
+                                )
+                            except Exception:
+                                pass
+                            plt.close(fig)
+
+                        plt.close("all")
+                        with contextlib.suppress(Exception):
+                            matplotlib.use(original_backend, force=True)
+
+                    public_stdout = stdout_capture.getvalue()
+                    public_stderr = stderr_capture.getvalue()
+
                 except Exception as e:
                     public_result = None
+                    public_stdout = stdout_capture.getvalue()
+                    public_stderr = stderr_capture.getvalue() + f"\n{e}"
                     print(f"⚠️  Public execution failed: {e}")
+                    # Restore backend and show on error too
+                    if has_matplotlib:
+                        plt.show = original_show
+                        plt.close("all")
+                        with contextlib.suppress(Exception):
+                            matplotlib.use(original_backend, force=True)
 
                 # Create ComputationRequest for private execution
                 comp_id = uuid4().hex
@@ -851,13 +1445,28 @@ def export(
                     result_name=name or f"{func.__name__}_result",
                 )
 
+                # Handle None results - use sentinel dict to allow proper display
+                # Functions that return None (like plotting functions) are valid
+                public_value = public_result
+                if public_value is None:
+                    public_value = {"_none_result": True, "has_figures": len(captured_figures) > 0}
+
                 # Return Twin with public result and computation request
                 result_twin = Twin(
-                    public=public_result,
+                    public=public_value,
                     private=comp_request,  # Computation request, not result yet
                     owner=destination_user or "unknown",
                     name=name or f"{func.__name__}_result",
                 )
+
+                # Attach captured outputs to the Twin
+                result_twin.public_stdout = public_stdout
+                result_twin.public_stderr = public_stderr
+                result_twin.public_figures = captured_figures
+                # Private outputs will be populated when .request_private() executes
+                result_twin.private_stdout = None
+                result_twin.private_stderr = None
+                result_twin.private_figures = None
 
                 return result_twin
 
@@ -1273,6 +1882,7 @@ class BeaverContext:
             reply_to=kwargs.get("reply_to"),
             strict=kwargs.get("strict", self.strict),
             policy=kwargs.get("policy", self.policy),
+            preserve_private=kwargs.get("preserve_private", False),
         )
         out_dir = kwargs.get("out_dir")
         to_user = kwargs.get("user")
@@ -1313,6 +1923,69 @@ class BeaverContext:
             policy=kwargs.get("policy", self.policy),
             delete_after=kwargs.get("delete_after", False),
         )
+
+    def wait_for_message(
+        self,
+        *,
+        timeout: float = 60.0,
+        poll_interval: float = 1.0,
+        filter_sender: Optional[str] = None,
+        filter_name: Optional[str] = None,
+        auto_load: bool = True,
+    ):
+        """
+        Wait for a new message to arrive in the inbox.
+
+        Args:
+            timeout: Max seconds to wait (default 60)
+            poll_interval: Seconds between checks (default 1)
+            filter_sender: Only wait for messages from this sender
+            filter_name: Only wait for messages with this name
+            auto_load: If True, automatically load and return the object
+
+        Returns:
+            If auto_load: (envelope, loaded_object)
+            Otherwise: envelope
+
+        Example:
+            # Wait for any message
+            env, obj = bv.wait_for_message()
+
+            # Wait for message from specific sender
+            env, obj = bv.wait_for_message(filter_sender="alice")
+
+            # Wait with custom timeout
+            env, obj = bv.wait_for_message(timeout=120)
+        """
+        # Get current envelope IDs to detect new ones
+        current_ids = {env.envelope_id for env in list_inbox(self.inbox_path)}
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            # Check for new envelopes
+            for env in list_inbox(self.inbox_path):
+                if env.envelope_id in current_ids:
+                    continue  # Not new
+
+                # Apply filters
+                if filter_sender and env.sender != filter_sender:
+                    continue
+                if filter_name and env.name != filter_name:
+                    continue
+
+                # Found a new matching envelope!
+                print(f"📬 New message: {env.name or env.envelope_id[:12]}")
+                print(f"   From: {env.sender}")
+
+                if auto_load:
+                    obj = unpack(env, strict=self.strict, policy=self.policy)
+                    return env, obj
+                return env
+
+            time.sleep(poll_interval)
+
+        print(f"⏰ Timeout after {timeout}s waiting for message")
+        return None, None if auto_load else None
 
     def load_by_id(self, envelope_id: str, **kwargs):
         """Load a payload by id using context inbox and inject into caller's globals."""

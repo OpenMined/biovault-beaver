@@ -49,6 +49,7 @@ class BeaverEnvelope:
         policy=None,
         live: bool = True,
         context=None,
+        auto_accept: bool = False,
     ) -> Any:
         """
         Load the envelope payload and inject into caller's globals.
@@ -61,12 +62,13 @@ class BeaverEnvelope:
             policy: Deserialization policy
             live: If True and object is a live-enabled Twin, auto-subscribe for updates (default: True)
             context: BeaverContext for live subscription (auto-detected if None)
+            auto_accept: If True, automatically accept trusted loaders without prompting
         """
         import inspect
 
         from .runtime import _check_overwrite, _inject, unpack
 
-        obj = unpack(self, strict=strict, policy=policy)
+        obj = unpack(self, strict=strict, policy=policy, auto_accept=auto_accept)
 
         # Auto-subscribe to live updates if this is a live-enabled Twin
         if live:
@@ -190,6 +192,7 @@ class BeaverEnvelope:
                     from .runtime import unpack
 
                     comp_req = unpack(self, strict=False)
+                    from .computation import _describe_bound_data
 
                     # Get context if we can (walk up frame stack)
                     context = None
@@ -304,6 +307,13 @@ class BeaverEnvelope:
                                 v_repr = v_repr[:57] + "..."
                             lines.append(f"  {k}= {v_type}: {v_repr}")
                             lines.append("      📌 Static value (bound at call time)")
+
+                    # Show bound data summary (similar to ComputationRequest.__repr__)
+                    bound_data_lines = _describe_bound_data(comp_req.args, comp_req.kwargs, context)
+                    if bound_data_lines:
+                        lines.append("")
+                        lines.append("Bound Data:")
+                        lines.extend(bound_data_lines)
 
                 except Exception as e:
                     lines.append("")

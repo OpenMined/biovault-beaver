@@ -87,6 +87,20 @@ start_client() {
   mkdir -p "$client_dir"
   ln -snf ../shared "$client_dir/shared"
 
+  # Symlink specific notebooks based on client role
+  local notebooks_dir="$ROOT_DIR/notebooks"
+  if [[ "$client" == "client1@sandbox.local" ]]; then
+    # Data Owner notebooks from do.txt
+    while IFS= read -r nb || [[ -n "$nb" ]]; do
+      [[ -n "$nb" && -f "$notebooks_dir/$nb" ]] && ln -snf "$notebooks_dir/$nb" "$client_dir/$nb"
+    done < "$notebooks_dir/do.txt"
+  elif [[ "$client" == "client2@sandbox.local" ]]; then
+    # Data Scientist notebooks from ds.txt
+    while IFS= read -r nb || [[ -n "$nb" ]]; do
+      [[ -n "$nb" && -f "$notebooks_dir/$nb" ]] && ln -snf "$notebooks_dir/$nb" "$client_dir/$nb"
+    done < "$notebooks_dir/ds.txt"
+  fi
+
   if [[ ! -f "$venv_path/bin/python" ]]; then
     echo "[$client] creating virtual environment at $venv_path"
     uv venv "$venv_path"

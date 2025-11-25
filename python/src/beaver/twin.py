@@ -14,6 +14,54 @@ from .remote_data import RemoteData
 _TWIN_REGISTRY = {}
 
 
+class CapturedFigure:
+    """Wrapper for captured matplotlib figure data that displays nicely in Jupyter."""
+
+    def __init__(self, fig_data: dict):
+        """Initialize from figure data dict containing 'figure' and/or 'png_bytes'."""
+        self._data = fig_data
+
+    @property
+    def figure(self):
+        """Get the matplotlib Figure object (may be stale)."""
+        return self._data.get("figure")
+
+    @property
+    def png_bytes(self) -> bytes:
+        """Get the PNG bytes of the figure."""
+        return self._data.get("png_bytes", b"")
+
+    def _repr_png_(self):
+        """Return PNG bytes for Jupyter display."""
+        return self.png_bytes
+
+    def __repr__(self):
+        size = len(self.png_bytes) if self.png_bytes else 0
+        has_fig = "yes" if self.figure else "no"
+        return f"<CapturedFigure png={size} bytes, figure={has_fig}>"
+
+
+def _safe_preview(val: Any) -> str:
+    """
+    Short, safe preview for large/complex objects (e.g., AnnData) used in Twin display.
+    """
+    try:
+        try:
+            import anndata  # type: ignore
+
+            if isinstance(val, anndata.AnnData):
+                return f"AnnData n_obs={val.n_obs}, n_vars={val.n_vars}"
+        except Exception:
+            pass
+
+        rep = repr(val)
+        if len(rep) > 60:
+            rep = rep[:57] + "..."
+        return rep
+    except Exception as exc:
+        return f"<{type(val).__name__} (preview failed: {exc})>"
+
+
 @dataclass
 class Twin(LiveMixin, RemoteData):
     """
@@ -53,6 +101,14 @@ class Twin(LiveMixin, RemoteData):
     live_enabled: bool = False
     live_interval: float = 2.0
 
+    # Captured outputs from computation execution (must be dataclass fields for pyfory serialization)
+    private_stdout: Optional[str] = None
+    private_stderr: Optional[str] = None
+    private_figures: Optional[list] = None  # List of dicts with _beaver_figure keys
+    public_stdout: Optional[str] = None
+    public_stderr: Optional[str] = None
+    public_figures: Optional[list] = None  # List of dicts with _beaver_figure keys
+
     def __post_init__(self):
         """Initialize Twin and validate."""
         # Initialize LiveMixin
@@ -88,6 +144,49 @@ class Twin(LiveMixin, RemoteData):
         if self.private is not None:
             key = (self.twin_id, self.owner)
             _TWIN_REGISTRY[key] = self
+
+    def __getstate__(self):
+        """Control what gets serialized - exclude non-serializable attributes."""
+        state = self.__dict__.copy()
+        # Remove non-serializable attributes (internal state)
+        non_serializable = [
+            "_value_accessed",
+            "_last_value_print",  # internal display state
+            "_live_subscribers",
+            "_live_context",  # runtime state
+            "_source_path",
+            "_watcher",
+            "_live_enabled",
+            "_live_mutable",  # live sync state
+            "_public_raw",  # raw AnnData reference
+        ]
+        for attr in non_serializable:
+            state.pop(attr, None)
+
+        # Handle figures - convert CapturedFigure objects to serializable dicts
+        for fig_attr in ("public_figures", "private_figures"):
+            if fig_attr in state:
+                figs = state[fig_attr]
+                if figs and isinstance(figs, list):
+                    converted = []
+                    for fig in figs:
+                        if isinstance(fig, dict):
+                            converted.append(fig)
+                        elif isinstance(fig, CapturedFigure) or hasattr(fig, "png_bytes"):
+                            converted.append({"_beaver_figure": True, "png_bytes": fig.png_bytes})
+                    state[fig_attr] = converted if converted else None
+
+        return state
+
+    def __setstate__(self, state):
+        """Restore from serialized state."""
+        self.__dict__.update(state)
+        # Re-initialize runtime attributes
+        self._value_accessed = False
+        self._last_value_print = 0.0
+        self._live_subscribers = []
+        self._live_context = None
+        self._source_path = None
 
     @classmethod
     def public_only(
@@ -148,11 +247,114 @@ class Twin(LiveMixin, RemoteData):
         return self.private
 
     @property
+    def public_raw(self):
+        """Access the underlying public object without any wrappers."""
+        return self.public
+
+    @property
+    def private_raw(self):
+        """Access the underlying private object without any wrappers."""
+        return self.private
+
+    @property
     def public_value(self):
         """Get public value (raises if not available)."""
         if self.public is None:
             raise ValueError("Public side not available")
         return self.public
+
+    @property
+    def public_safe(self):
+        """Get public value with sparse shapes ensured (for repr stability)."""
+        try:
+            from .remote_vars import _ensure_sparse_shapes
+
+            return _ensure_sparse_shapes(self.public)
+        except Exception:
+            return self.public
+
+    def can_send(self, **kwargs):
+        """
+        Check if this Twin can be serialized/deserialized for sending.
+
+        Returns:
+            (ok, message)
+        """
+        from .runtime import can_send as _can_send
+
+        return _can_send(self, **kwargs)
+
+    def show_figures(self, which: str = "public"):
+        """
+        Display captured matplotlib figures in Jupyter.
+
+        Args:
+            which: "public", "private", or "both"
+        """
+        try:
+            from IPython.display import Image, display
+        except ImportError:
+            print("⚠️  Requires IPython for figure display")
+            return
+
+        def display_fig_list(figs, label):
+            if not figs:
+                print(f"📊 No {label} figures captured")
+                return
+            print(f"📊 {label.capitalize()} figures ({len(figs)}):")
+            for i, fig_data in enumerate(figs):
+                if isinstance(fig_data, CapturedFigure):
+                    # Display CapturedFigure directly (has _repr_png_)
+                    display(fig_data)
+                elif isinstance(fig_data, dict) and "png_bytes" in fig_data:
+                    # Display from PNG bytes dict
+                    display(Image(data=fig_data["png_bytes"]))
+                elif hasattr(fig_data, "savefig"):
+                    # It's a matplotlib figure object
+                    display(fig_data)
+                else:
+                    print(f"  Figure {i}: {type(fig_data)}")
+
+        if which in ("public", "both"):
+            figs = getattr(self, "public_figures", None) or []
+            if figs or which == "public":
+                display_fig_list(figs, "public")
+
+        if which in ("private", "both"):
+            figs = getattr(self, "private_figures", None) or []
+            if figs or which == "private":
+                display_fig_list(figs, "private")
+
+    def show_output(self, which: str = "public"):
+        """
+        Display captured stdout/stderr.
+
+        Args:
+            which: "public", "private", or "both"
+        """
+        if which in ("public", "both"):
+            stdout = getattr(self, "public_stdout", None)
+            stderr = getattr(self, "public_stderr", None)
+            if stdout or stderr:
+                print("📤 Public output:")
+                if stdout:
+                    print(f"  stdout: {stdout}")
+                if stderr:
+                    print(f"  \033[31mstderr: {stderr}\033[0m")
+            elif which == "public":
+                print("📤 No public output captured")
+
+        if which in ("private", "both"):
+            stdout = getattr(self, "private_stdout", None)
+            stderr = getattr(self, "private_stderr", None)
+            if stdout or stderr:
+                print("📤 Private output:")
+                if stdout:
+                    print(f"  stdout: {stdout}")
+                if stderr:
+                    print(f"  \033[31mstderr: {stderr}\033[0m")
+            elif which == "private":
+                print("📤 No private output captured")
 
     @property
     def value(self):
@@ -183,6 +385,51 @@ class Twin(LiveMixin, RemoteData):
             return self.public
         else:
             raise ValueError("No data available")
+
+    def merge_result(self, result_twin: Twin):
+        """
+        Merge a received result Twin's properties into this Twin.
+
+        Used when manually loading computation results from inbox.
+        The result_twin typically has public=None and private=actual_result.
+        This merges the private side and any captured outputs without
+        creating a nested Twin structure.
+
+        Args:
+            result_twin: The received Twin containing the result
+
+        Example:
+            >>> # After manually loading from inbox:
+            >>> result_env = bv.inbox()['my_result']
+            >>> received = result_env.load(inject=False)
+            >>> my_result.merge_result(received)  # Merge into existing Twin
+        """
+        if not isinstance(result_twin, Twin):
+            raise TypeError(f"Expected Twin, got {type(result_twin).__name__}")
+
+        # Merge the private value
+        if result_twin.has_private:
+            object.__setattr__(self, "private", result_twin.private)
+
+        # Copy over captured outputs
+        for attr in ("private_stdout", "private_stderr", "private_figures"):
+            if hasattr(result_twin, attr):
+                val = getattr(result_twin, attr)
+                if val is not None:
+                    setattr(self, attr, val)
+
+        # Also update public if the result has it (unusual but possible)
+        if result_twin.has_public:
+            object.__setattr__(self, "public", result_twin.public)
+            for attr in ("public_stdout", "public_stderr", "public_figures"):
+                if hasattr(result_twin, attr):
+                    val = getattr(result_twin, attr)
+                    if val is not None:
+                        setattr(self, attr, val)
+
+        print(f"✅ Merged result into Twin '{self.name or self.twin_id[:8]}...'")
+        if result_twin.has_private:
+            print("   .private now contains the approved result")
 
     def request_private(self, context=None, name=None):
         """
@@ -239,10 +486,14 @@ class Twin(LiveMixin, RemoteData):
             print(f"   Result: {result_name}")
 
             # Pack and send the computation request
+            default_request_name = f"request_{self.private.func.__name__}"
+            if result_name:
+                default_request_name += f"_for_{result_name}"
+
             env = pack(
                 self.private,
                 sender=context.user,
-                name=result_name,
+                name=default_request_name,
             )
 
             # Send to owner's inbox
@@ -465,18 +716,14 @@ class Twin(LiveMixin, RemoteData):
 
         # Private side
         if self.has_private:
-            private_repr = repr(self.private)
-            if len(private_repr) > 60:
-                private_repr = private_repr[:57] + "..."
+            private_repr = _safe_preview(self.private)
             lines.append(f"  \033[31m🔒 Private\033[0m    {private_repr}    ← .value uses this")
         else:
             lines.append("  🔒 Private    (not available) 💡 .request_private()")
 
         # Public side
         if self.has_public:
-            public_repr = repr(self.public)
-            if len(public_repr) > 60:
-                public_repr = public_repr[:57] + "..."
+            public_repr = _safe_preview(self.public)
             active_marker = "    ← .value uses this" if not self.has_private else "    ✓"
             lines.append(f"  \033[32m🌍 Public\033[0m    {public_repr}{active_marker}")
         else:
@@ -490,10 +737,26 @@ class Twin(LiveMixin, RemoteData):
         if hasattr(self, "_display_live_status"):
             lines.extend(self._display_live_status())
 
+        # Captured outputs (from @bv decorated function execution)
+        if hasattr(self, "public_stdout") and self.public_stdout:
+            lines.append(f"  📤 Captured stdout: {len(self.public_stdout)} chars")
+        if hasattr(self, "public_stderr") and self.public_stderr:
+            lines.append(f"  ⚠️  Captured stderr: {len(self.public_stderr)} chars")
+        if hasattr(self, "public_figures") and self.public_figures:
+            lines.append(f"  📊 Captured figures: {len(self.public_figures)}")
+
         # IDs (compact)
         lines.append(
             f"  IDs: twin={self.twin_id[:8]}... private={self.private_id[:8]}... public={self.public_id[:8]}..."
         )
+
+        # Hint about captured outputs
+        if (
+            (hasattr(self, "public_stdout") and self.public_stdout)
+            or (hasattr(self, "public_stderr") and self.public_stderr)
+            or (hasattr(self, "public_figures") and self.public_figures)
+        ):
+            lines.append("  💡 Access: .public_stdout, .public_stderr, .public_figures")
 
         return "\n".join(lines)
 
@@ -507,18 +770,14 @@ class Twin(LiveMixin, RemoteData):
 
         private_html = ""
         if self.has_private:
-            private_repr = repr(self.private)
-            if len(private_repr) > 60:
-                private_repr = private_repr[:57] + "..."
+            private_repr = _safe_preview(self.private)
             private_html = f"<tr><td>🔒 Private</td><td><code>{private_repr}</code></td><td><span style='color: green; font-weight: bold;'>← .value uses this</span></td></tr>"
         else:
             private_html = "<tr><td>🔒 Private</td><td><i>not available</i></td><td><a href='#'>.request_private()</a></td></tr>"
 
         public_html = ""
         if self.has_public:
-            public_repr = repr(self.public)
-            if len(public_repr) > 60:
-                public_repr = public_repr[:57] + "..."
+            public_repr = _safe_preview(self.public)
             active_marker = (
                 "<span style='color: green; font-weight: bold;'>← .value uses this</span>"
                 if not self.has_private

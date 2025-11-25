@@ -68,6 +68,10 @@ class BeaverEnvelope:
 
         from .runtime import _check_overwrite, _inject, unpack
 
+        # Check for missing imports before unpacking (to avoid ModuleNotFoundError during deserialization)
+        if self.manifest.get("required_versions"):
+            self._check_and_prompt_missing_imports()
+
         obj = unpack(self, strict=strict, policy=policy, auto_accept=auto_accept)
 
         # Auto-subscribe to live updates if this is a live-enabled Twin
@@ -136,6 +140,56 @@ class BeaverEnvelope:
                     print(f"✓ Loaded '{names_str}' into globals")
 
         return obj
+
+    def _check_and_prompt_missing_imports(self) -> None:
+        """
+        Check for missing imports and prompt user to install before unpacking.
+
+        Raises ImportError if user declines to install missing packages.
+        """
+        required_versions = self.manifest.get("required_versions", {})
+        if not required_versions:
+            return
+
+        # Check which modules are missing
+        missing = []
+        for module_name, version in required_versions.items():
+            try:
+                __import__(module_name)
+            except ImportError:
+                # Map common module names to pip package names
+                package_map = {
+                    "sklearn": "scikit-learn",
+                    "cv2": "opencv-python",
+                    "PIL": "pillow",
+                    "skimage": "scikit-image",
+                }
+                pkg_name = package_map.get(module_name, module_name)
+                missing.append((pkg_name, version))
+
+        if not missing:
+            return
+
+        # Get function name from manifest if available
+        func_name = self.manifest.get("func_name", self.name or "computation")
+
+        # Prompt user to install
+        from .computation import _is_uv_venv, _prompt_install_function_deps
+
+        if not _prompt_install_function_deps(missing, func_name):
+            # User declined - raise helpful error
+            import shutil
+
+            use_uv = _is_uv_venv() and shutil.which("uv")
+            pip_cmd = "uv pip install" if use_uv else "pip install"
+            specs = [f"{p}=={v}" if v else p for p, v in missing]
+            raise ImportError(
+                f"\n\n❌ Cannot load '{func_name}' - missing dependencies\n\n"
+                f"   Required packages not installed:\n"
+                + "\n".join(f"   • {s}" for s in specs)
+                + f"\n\n   To fix, run:\n"
+                f"   {pip_cmd} {' '.join(specs)}\n"
+            )
 
     def __str__(self) -> str:
         """Human-readable representation of the envelope."""

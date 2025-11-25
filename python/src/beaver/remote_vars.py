@@ -17,6 +17,100 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _is_uv_venv() -> bool:
+    """Check if we're running in a uv-managed virtual environment."""
+    import os
+    import sys
+
+    # Check for uv marker file in the venv
+    if hasattr(sys, "prefix"):
+        uv_marker = Path(sys.prefix) / "uv.lock"
+        if uv_marker.exists():
+            return True
+        # Also check for pyvenv.cfg with uv indicator
+        pyvenv_cfg = Path(sys.prefix) / "pyvenv.cfg"
+        if pyvenv_cfg.exists():
+            with contextlib.suppress(Exception):
+                content = pyvenv_cfg.read_text()
+                if "uv" in content.lower():
+                    return True
+
+    # Check if UV_VIRTUAL_ENV is set
+    if os.environ.get("UV_VIRTUAL_ENV"):
+        return True
+
+    # Check if uv command is available and we're in a venv it recognizes
+    if os.environ.get("VIRTUAL_ENV"):
+        import shutil
+
+        if shutil.which("uv"):
+            return True
+
+    return False
+
+
+def _prompt_install_deps(missing: list[str], var_name: str) -> bool:
+    """
+    Prompt user to install missing dependencies.
+
+    Returns True if installation succeeded, False otherwise.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    deps_str = " ".join(missing)
+    use_uv = _is_uv_venv() and shutil.which("uv")
+    pip_cmd = "uv pip install" if use_uv else "pip install"
+
+    print(f"\n⚠️  Missing dependencies for '{var_name}': {', '.join(missing)}")
+    print(f"   To load this data, you need to install: {deps_str}")
+    print()
+
+    try:
+        response = input(f"Install now with '{pip_cmd} {deps_str}'? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        print("💡 To install manually, run:")
+        print(f"   {pip_cmd} {deps_str}")
+        return False
+
+    if response in ("y", "yes"):
+        print(f"\n📦 Installing {deps_str}...")
+        try:
+            if use_uv:
+                cmd = ["uv", "pip", "install"] + missing
+            else:
+                cmd = [sys.executable, "-m", "pip", "install"] + missing
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                print(f"✅ Successfully installed: {deps_str}")
+                # Re-import to make packages available
+                for pkg in missing:
+                    with contextlib.suppress(Exception):
+                        importlib.import_module(pkg)
+                return True
+            else:
+                print("❌ Installation failed:")
+                print(result.stderr)
+                print("\n💡 To install manually, run:")
+                print(f"   {pip_cmd} {deps_str}")
+                return False
+        except Exception as e:
+            print(f"❌ Installation failed: {e}")
+            print("\n💡 To install manually, run:")
+            print(f"   {pip_cmd} {deps_str}")
+            return False
+    else:
+        print("\n💡 To install manually, run:")
+        print(f"   {pip_cmd} {deps_str}")
+        return False
+
+
 def _detect_dependencies(obj: Any) -> Dict[str, str]:
     """
     Best-effort dependency detection for shared objects.
@@ -708,11 +802,16 @@ class RemoteVarPointer:
                 if self.remote_var.deps:
                     missing = self._missing_deps()
                     if missing:
-                        self._last_error = (
-                            f"Missing dependencies: {', '.join(missing)} "
-                            f"required for '{self.remote_var.name}'"
-                        )
-                        return None
+                        # Prompt user to install missing dependencies
+                        if _prompt_install_deps(missing, self.remote_var.name):
+                            # Re-check after installation
+                            missing = self._missing_deps()
+                        if missing:
+                            self._last_error = (
+                                f"Missing dependencies: {', '.join(missing)} "
+                                f"required for '{self.remote_var.name}'"
+                            )
+                            return None
 
                 if data_path.exists():
                     env = read_envelope(data_path)
@@ -799,13 +898,26 @@ class RemoteVarPointer:
                 except Exception:
                     pass
                 return value
+            # Build a helpful error message
+            if self.remote_var.deps:
+                missing = self._missing_deps()
+                if missing:
+                    import shutil
+
+                    deps_str = " ".join(missing)
+                    use_uv = _is_uv_venv() and shutil.which("uv")
+                    pip_cmd = "uv pip install" if use_uv else "pip install"
+                    msg = (
+                        f"\n\n❌ Cannot access '{self.remote_var.name}.{name}' - missing dependencies\n\n"
+                        f"   Required packages not installed: {', '.join(missing)}\n\n"
+                        f"   To fix, run:\n"
+                        f"   {pip_cmd} {deps_str}\n\n"
+                        f"   Then retry: {self.remote_var.name}.{name}\n"
+                    )
+                    raise AttributeError(msg)
             msg = "Remote Twin data not available."
             if getattr(self, "_last_error", None):
-                msg += f" Last load error: {self._last_error}"
-                if self.remote_var.deps:
-                    missing = self._missing_deps()
-                    if missing:
-                        msg += f" Missing: {', '.join(missing)}. Install and retry."
+                msg += f" Load error: {self._last_error}"
             else:
                 msg += f" Ask the owner to publish/send '{self.remote_var.name}'."
             raise AttributeError(msg)

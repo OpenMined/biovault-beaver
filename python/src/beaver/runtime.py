@@ -563,6 +563,17 @@ def pack(
     manifest["size_bytes"] = len(payload)
     manifest["language"] = "python"
 
+    # If packing a ComputationRequest, add required_versions to manifest
+    from .computation import ComputationRequest, _detect_function_imports_with_versions
+
+    if isinstance(obj, ComputationRequest) and hasattr(obj, "func"):
+        try:
+            versions = _detect_function_imports_with_versions(obj.func)
+            if versions:
+                manifest["required_versions"] = versions
+        except Exception:
+            pass  # Don't fail if version detection fails
+
     env_id = envelope_id or uuid4().hex
 
     return BeaverEnvelope(
@@ -1277,6 +1288,26 @@ def export(
 
             # If Twins detected, return Twin result
             if has_twin:
+                # Check for missing imports before execution
+                from .computation import _check_missing_imports, _prompt_install_function_deps
+
+                missing_imports = _check_missing_imports(func)
+                if missing_imports and not _prompt_install_function_deps(
+                    missing_imports, func.__name__
+                ):
+                    # User declined or installation failed - raise error
+                    import shutil
+
+                    use_uv = shutil.which("uv") is not None
+                    pip_cmd = "uv pip install" if use_uv else "pip install"
+                    deps_str = " ".join(missing_imports)
+                    raise ImportError(
+                        f"\n\n❌ Cannot execute '{func.__name__}' - missing dependencies\n\n"
+                        f"   Required packages not installed: {', '.join(missing_imports)}\n\n"
+                        f"   To fix, run:\n"
+                        f"   {pip_cmd} {deps_str}\n"
+                    )
+
                 # Execute on public data immediately with output capture
                 from .remote_vars import _ensure_sparse_shapes, _SafeDisplayProxy
 
@@ -1435,6 +1466,11 @@ def export(
 
                 # Create ComputationRequest for private execution
                 comp_id = uuid4().hex
+                # Detect required package versions for the function
+                from .computation import _detect_function_imports_with_versions
+
+                required_versions = _detect_function_imports_with_versions(func)
+
                 comp_request = ComputationRequest(
                     comp_id=comp_id,
                     result_id=uuid4().hex,
@@ -1443,6 +1479,7 @@ def export(
                     kwargs=kwargs,
                     sender=context.user if context else "unknown",
                     result_name=name or f"{func.__name__}_result",
+                    required_versions=required_versions,
                 )
 
                 # Handle None results - use sentinel dict to allow proper display

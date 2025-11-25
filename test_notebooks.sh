@@ -43,6 +43,8 @@ setup_client() {
     ln -snf "$NOTEBOOKS_DIR/single_cell" "$client_dir/single_cell"
 
     # Copy test notebook (not symlink - we want to execute in place)
+    # Remove first in case it's a symlink from dev.sh
+    rm -f "$client_dir/$notebook"
     cp "$NOTEBOOKS_DIR/$notebook" "$client_dir/$notebook"
 
     # Create virtualenv if needed

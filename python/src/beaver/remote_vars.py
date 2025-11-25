@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import json
+import contextlib
 import importlib
 import importlib.metadata
+import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -82,13 +83,17 @@ class _SafeDisplayProxy:
             # Lazy import to avoid cycles
             from .twin import _safe_preview
         except Exception:
-            _safe_preview = lambda v: repr(v)
+
+            def _safe_preview(v):
+                return repr(v)
+
         preview = _safe_preview(self._raw)
         return f"<{self._label} (preview): {preview} — real object at ._raw>"
 
     def _repr_html_(self) -> str:
         try:
             from .twin import _safe_preview
+
             preview = _safe_preview(self._raw)
         except Exception:
             preview = repr(self._raw)
@@ -807,7 +812,9 @@ class RemoteVarPointer:
 
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
-    def load(self, *, inject: bool = True, as_name: Optional[str] = None, auto_accept: bool = False):
+    def load(
+        self, *, inject: bool = True, as_name: Optional[str] = None, auto_accept: bool = False
+    ):
         """
         Load the remote variable data.
 
@@ -949,6 +956,8 @@ class RemoteVarPointer:
         return (
             self.remote_var._repr_html_() if hasattr(self.remote_var, "_repr_html_") else repr(self)
         )
+
+
 def _ensure_sparse_shapes(val: Any) -> Any:
     """
     Ensure scipy sparse matrices keep their shape metadata after deserialization.

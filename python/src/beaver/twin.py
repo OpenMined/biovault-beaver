@@ -150,9 +150,14 @@ class Twin(LiveMixin, RemoteData):
         state = self.__dict__.copy()
         # Remove non-serializable attributes (internal state)
         non_serializable = [
-            "_value_accessed", "_last_value_print",  # internal display state
-            "_live_subscribers", "_live_context",  # runtime state
-            "_source_path", "_watcher", "_live_enabled", "_live_mutable",  # live sync state
+            "_value_accessed",
+            "_last_value_print",  # internal display state
+            "_live_subscribers",
+            "_live_context",  # runtime state
+            "_source_path",
+            "_watcher",
+            "_live_enabled",
+            "_live_mutable",  # live sync state
             "_public_raw",  # raw AnnData reference
         ]
         for attr in non_serializable:
@@ -167,9 +172,7 @@ class Twin(LiveMixin, RemoteData):
                     for fig in figs:
                         if isinstance(fig, dict):
                             converted.append(fig)
-                        elif isinstance(fig, CapturedFigure):
-                            converted.append({"_beaver_figure": True, "png_bytes": fig.png_bytes})
-                        elif hasattr(fig, "png_bytes"):
+                        elif isinstance(fig, CapturedFigure) or hasattr(fig, "png_bytes"):
                             converted.append({"_beaver_figure": True, "png_bytes": fig.png_bytes})
                     state[fig_attr] = converted if converted else None
 
@@ -383,7 +386,7 @@ class Twin(LiveMixin, RemoteData):
         else:
             raise ValueError("No data available")
 
-    def merge_result(self, result_twin: "Twin"):
+    def merge_result(self, result_twin: Twin):
         """
         Merge a received result Twin's properties into this Twin.
 
@@ -748,9 +751,11 @@ class Twin(LiveMixin, RemoteData):
         )
 
         # Hint about captured outputs
-        if (hasattr(self, "public_stdout") and self.public_stdout) or \
-           (hasattr(self, "public_stderr") and self.public_stderr) or \
-           (hasattr(self, "public_figures") and self.public_figures):
+        if (
+            (hasattr(self, "public_stdout") and self.public_stdout)
+            or (hasattr(self, "public_stderr") and self.public_stderr)
+            or (hasattr(self, "public_figures") and self.public_figures)
+        ):
             lines.append("  💡 Access: .public_stdout, .public_stderr, .public_figures")
 
         return "\n".join(lines)

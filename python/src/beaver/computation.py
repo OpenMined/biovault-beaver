@@ -6,7 +6,7 @@ import ast
 import builtins
 import inspect
 import io
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -28,10 +28,9 @@ def _detect_global_access(func: Callable) -> list[str]:
     # Find the function definition
     func_def = None
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name == func.__name__:
-                func_def = node
-                break
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func.__name__:
+            func_def = node
+            break
 
     if func_def is None:
         return []
@@ -61,16 +60,15 @@ def _detect_global_access(func: Callable) -> list[str]:
                 for elt in node.target.elts:
                     if isinstance(elt, ast.Name):
                         locals_assigned.add(elt.id)
-        elif isinstance(node, ast.comprehension):
-            if isinstance(node.target, ast.Name):
-                locals_assigned.add(node.target.id)
+        elif isinstance(node, ast.comprehension) and isinstance(node.target, ast.Name):
+            locals_assigned.add(node.target.id)
 
     # Collect imports
     imports = set()
     for node in ast.walk(func_def):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                imports.add(alias.asname or alias.name.split('.')[0])
+                imports.add(alias.asname or alias.name.split(".")[0])
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 imports.add(alias.asname or alias.name)
@@ -84,9 +82,14 @@ def _detect_global_access(func: Callable) -> list[str]:
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
             name = node.id
             # Skip if it's a parameter, local, import, or builtin
-            if name not in params and name not in locals_assigned and name not in imports and name not in builtin_names:
-                if name not in potential_globals:
-                    potential_globals.append(name)
+            if (
+                name not in params
+                and name not in locals_assigned
+                and name not in imports
+                and name not in builtin_names
+                and name not in potential_globals
+            ):
+                potential_globals.append(name)
 
     return potential_globals
 
@@ -151,13 +154,17 @@ def _update_twin_result(comp_id: str, result_value: Any):
                     if val is not None:
                         setattr(existing_twin, attr, val)
 
-            print(f"✨ Twin result auto-updated: {existing_twin.name or existing_twin.twin_id[:8]}...")
+            print(
+                f"✨ Twin result auto-updated: {existing_twin.name or existing_twin.twin_id[:8]}..."
+            )
             print("   .private now contains the approved result")
             print("   .public still has your local mock data")
         else:
             # Non-Twin result - just set as private (legacy/simple case)
             object.__setattr__(existing_twin, "private", result_value)
-            print(f"✨ Twin result auto-updated: {existing_twin.name or existing_twin.twin_id[:8]}...")
+            print(
+                f"✨ Twin result auto-updated: {existing_twin.name or existing_twin.twin_id[:8]}..."
+            )
             print("   .private now contains the approved result")
 
         # Remove from registry after updating
@@ -470,6 +477,7 @@ class ComputationResult:
         def fig_to_png_bytes(fig):
             """Convert matplotlib Figure to PNG bytes."""
             import io
+
             buf = io.BytesIO()
             fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
             buf.seek(0)
@@ -484,6 +492,7 @@ class ComputationResult:
             # Handle matplotlib Figure
             try:
                 import matplotlib.figure
+
                 if isinstance(obj, matplotlib.figure.Figure):
                     return {"_beaver_figure": True, "png_bytes": fig_to_png_bytes(obj)}
             except ImportError:
@@ -492,6 +501,7 @@ class ComputationResult:
             # Handle matplotlib Axes - convert to figure PNG
             try:
                 from matplotlib.axes import Axes
+
                 if isinstance(obj, Axes):
                     if obj.figure:
                         return {"_beaver_figure": True, "png_bytes": fig_to_png_bytes(obj.figure)}
@@ -502,9 +512,11 @@ class ComputationResult:
             # Handle AnnData - convert to a serializable summary
             try:
                 import anndata
+
                 if isinstance(obj, anndata.AnnData):
                     # Check if there's a TrustedLoader registered for AnnData
                     from .runtime import TrustedLoader
+
                     tl = TrustedLoader.get(type(obj))
                     if tl:
                         # Use TrustedLoader - will be handled by _prepare_for_sending
@@ -515,7 +527,8 @@ class ComputationResult:
                         "n_obs": obj.n_obs,
                         "n_vars": obj.n_vars,
                         "obs_names": list(obj.obs_names[:10]) + (["..."] if obj.n_obs > 10 else []),
-                        "var_names": list(obj.var_names[:10]) + (["..."] if obj.n_vars > 10 else []),
+                        "var_names": list(obj.var_names[:10])
+                        + (["..."] if obj.n_vars > 10 else []),
                         "shape": obj.shape,
                     }
             except ImportError:
@@ -524,6 +537,7 @@ class ComputationResult:
             # Handle scipy sparse matrices
             try:
                 import scipy.sparse
+
                 if scipy.sparse.issparse(obj):
                     # Convert to dense if small, otherwise to COO format data
                     if obj.nnz < 10000:
@@ -534,7 +548,7 @@ class ComputationResult:
                         "nnz": obj.nnz,
                         "format": obj.format,
                         "data": obj.data.tolist()[:1000],  # First 1000 values
-                        "note": "Truncated for serialization"
+                        "note": "Truncated for serialization",
                     }
             except ImportError:
                 pass
@@ -542,8 +556,9 @@ class ComputationResult:
             # Handle pandas DataFrames and Series
             try:
                 import pandas as pd
+
                 if isinstance(obj, pd.DataFrame):
-                    return obj.to_dict(orient='list')
+                    return obj.to_dict(orient="list")
                 if isinstance(obj, pd.Series):
                     return obj.to_dict()
             except ImportError:
@@ -552,6 +567,7 @@ class ComputationResult:
             # Handle numpy types
             try:
                 import numpy as np
+
                 if isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
                     return int(obj)
                 if isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
@@ -566,7 +582,7 @@ class ComputationResult:
                             "shape": obj.shape,
                             "dtype": str(obj.dtype),
                             "sample": obj.flatten()[:100].tolist(),
-                            "note": "Truncated for serialization"
+                            "note": "Truncated for serialization",
                         }
                     return obj.tolist()
             except ImportError:
@@ -592,33 +608,21 @@ class ComputationResult:
             # Catch any matplotlib objects we missed
             if "matplotlib" in type_name:
                 try:
-                    return {
-                        "_matplotlib_object": True,
-                        "type": type_name,
-                        "repr": repr(obj)[:200]
-                    }
+                    return {"_matplotlib_object": True, "type": type_name, "repr": repr(obj)[:200]}
                 except Exception:
                     return {"_matplotlib_object": True, "type": type_name}
 
             # Check if object lacks serializable state
-            if not hasattr(obj, '__dict__') and not hasattr(obj, '__slots__'):
+            if not hasattr(obj, "__dict__") and not hasattr(obj, "__slots__"):
                 # Object without state - return a placeholder
-                return {
-                    "_unserializable": True,
-                    "type": type_name,
-                    "repr": repr(obj)[:200]
-                }
+                return {"_unserializable": True, "type": type_name, "repr": repr(obj)[:200]}
 
             # Try to detect other problematic objects by checking if they're from
             # common scientific libraries that have complex internal state
-            problematic_modules = ('scanpy', 'anndata', 'matplotlib', 'scipy', 'sklearn')
+            problematic_modules = ("scanpy", "anndata", "matplotlib", "scipy", "sklearn")
             if any(mod in type_name for mod in problematic_modules):
                 try:
-                    return {
-                        "_complex_object": True,
-                        "type": type_name,
-                        "repr": repr(obj)[:200]
-                    }
+                    return {"_complex_object": True, "type": type_name, "repr": repr(obj)[:200]}
                 except Exception:
                     return {"_complex_object": True, "type": type_name}
 
@@ -630,10 +634,10 @@ class ComputationResult:
                 return []
             result = []
             for fig_item in figs:
-                if hasattr(fig_item, 'png_bytes'):
+                if hasattr(fig_item, "png_bytes"):
                     # CapturedFigure - already has PNG bytes
                     result.append({"_beaver_figure": True, "png_bytes": fig_item.png_bytes})
-                elif hasattr(fig_item, 'savefig'):
+                elif hasattr(fig_item, "savefig"):
                     # Raw matplotlib Figure
                     result.append({"_beaver_figure": True, "png_bytes": fig_to_png_bytes(fig_item)})
             return result
@@ -900,7 +904,7 @@ class ComputationRequest:
         Returns ComputationResult where .data is a Twin with only private side.
         If execution fails, returns ComputationResult with error (no Twin).
         """
-        from .remote_vars import _SafeDisplayProxy, _ensure_sparse_shapes
+        from .remote_vars import _ensure_sparse_shapes, _SafeDisplayProxy
         from .twin import _TWIN_REGISTRY, CapturedFigure, Twin
 
         def unwrap_for_computation(val):
@@ -973,18 +977,16 @@ class ComputationRequest:
             import matplotlib.pyplot as plt
 
             # Close ALL existing figures to ensure clean state
-            plt.close('all')
+            plt.close("all")
             original_backend = matplotlib.get_backend()
-            try:
+            with suppress(Exception):
                 matplotlib.use("Agg", force=True)
-            except Exception:
-                pass
             has_matplotlib = True
 
             # Hook plt.show() to capture figures BEFORE they're potentially closed
             original_show = plt.show
 
-            def capturing_show(*args, **kwargs):
+            def capturing_show(*_args, **_kwargs):
                 """Capture all current figures when show() is called."""
                 nonlocal captured_figures
                 for fig_num in plt.get_fignums():
@@ -993,10 +995,14 @@ class ComputationRequest:
                     try:
                         fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                         buf.seek(0)
-                        captured_figures.append(CapturedFigure({
-                            "figure": None,
-                            "png_bytes": buf.getvalue(),
-                        }))
+                        captured_figures.append(
+                            CapturedFigure(
+                                {
+                                    "figure": None,
+                                    "png_bytes": buf.getvalue(),
+                                }
+                            )
+                        )
                     except Exception:
                         pass
 
@@ -1030,6 +1036,7 @@ class ComputationRequest:
                     figs = set()
                     try:
                         from matplotlib.axes import Axes
+
                         if isinstance(obj, Axes):
                             if obj.figure:
                                 figs.add(obj.figure)
@@ -1055,33 +1062,34 @@ class ComputationRequest:
                     try:
                         fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                         buf.seek(0)
-                        captured_figures.append(CapturedFigure({
-                            "figure": fig,
-                            "png_bytes": buf.getvalue(),
-                        }))
+                        captured_figures.append(
+                            CapturedFigure(
+                                {
+                                    "figure": fig,
+                                    "png_bytes": buf.getvalue(),
+                                }
+                            )
+                        )
                     except Exception:
                         pass
                     plt.close(fig)
 
                 # Clean up and restore original backend
-                plt.close('all')
-                try:
+                plt.close("all")
+                with suppress(Exception):
                     matplotlib.use(original_backend, force=True)
-                except Exception:
-                    pass
 
         except Exception as e:
             error = str(e)
             import traceback
+
             stderr_capture.write(traceback.format_exc())
             # Restore matplotlib state on error
             if has_matplotlib:
                 plt.show = original_show
-                plt.close('all')
-                try:
+                plt.close("all")
+                with suppress(Exception):
                     matplotlib.use(original_backend, force=True)
-                except Exception:
-                    pass
 
         stdout_str = stdout_capture.getvalue()
         stderr_str = stderr_capture.getvalue()
@@ -1139,7 +1147,7 @@ class ComputationRequest:
 
         Returns ComputationResult where .data is a Twin with only public side.
         """
-        from .remote_vars import _SafeDisplayProxy, _ensure_sparse_shapes
+        from .remote_vars import _ensure_sparse_shapes, _SafeDisplayProxy
         from .twin import _TWIN_REGISTRY, Twin
 
         def unwrap_for_computation(val):
@@ -1221,16 +1229,14 @@ class ComputationRequest:
 
             existing_figs = set(plt.get_fignums())
             original_backend = matplotlib.get_backend()
-            try:
+            with suppress(Exception):
                 matplotlib.use("Agg", force=True)
-            except Exception:
-                pass
             has_matplotlib = True
 
             # Hook plt.show() to capture figures BEFORE they're potentially closed
             original_show = plt.show
 
-            def capturing_show(*args, **kwargs):
+            def capturing_show(*_args, **_kwargs):
                 """Capture all current figures when show() is called."""
                 nonlocal captured_figures
                 for fig_num in plt.get_fignums():
@@ -1240,14 +1246,17 @@ class ComputationRequest:
                         try:
                             fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                             buf.seek(0)
-                            captured_figures.append(CapturedFigure({
-                                "figure": None,  # Don't keep reference to avoid issues
-                                "png_bytes": buf.getvalue(),
-                            }))
+                            captured_figures.append(
+                                CapturedFigure(
+                                    {
+                                        "figure": None,  # Don't keep reference to avoid issues
+                                        "png_bytes": buf.getvalue(),
+                                    }
+                                )
+                            )
                         except Exception:
                             pass
                 # Don't call original show - we're in Agg backend anyway
-                # original_show(*args, **kwargs)
 
             plt.show = capturing_show
 
@@ -1278,6 +1287,7 @@ class ComputationRequest:
                     figs = set()
                     try:
                         from matplotlib.axes import Axes
+
                         if isinstance(obj, Axes):
                             if obj.figure and obj.figure.number not in existing_figs:
                                 figs.add(obj.figure)
@@ -1303,21 +1313,23 @@ class ComputationRequest:
                     try:
                         fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                         buf.seek(0)
-                        captured_figures.append(CapturedFigure({
-                            "figure": fig,
-                            "png_bytes": buf.getvalue(),
-                        }))
+                        captured_figures.append(
+                            CapturedFigure(
+                                {
+                                    "figure": fig,
+                                    "png_bytes": buf.getvalue(),
+                                }
+                            )
+                        )
                     except Exception:
                         pass
                     plt.close(fig)
 
                 # Also close any figures that were captured via show() hook
-                plt.close('all')
+                plt.close("all")
 
-                try:
+                with suppress(Exception):
                     matplotlib.use(original_backend, force=True)
-                except Exception:
-                    pass
 
             public_stdout = stdout_capture.getvalue()
             public_stderr = stderr_capture.getvalue()
@@ -1333,10 +1345,8 @@ class ComputationRequest:
                 new_figs = set(plt.get_fignums()) - existing_figs
                 for fig_num in new_figs:
                     plt.close(fig_num)
-                try:
+                with suppress(Exception):
                     matplotlib.use(original_backend, force=True)
-                except Exception:
-                    pass
 
         if mock_error:
             print(f"⚠️  Mock execution failed: {mock_error}")
@@ -1387,7 +1397,7 @@ class ComputationRequest:
         Runs mock first, then real. Returns ComputationResult where .data is
         a Twin with both sides for comparison.
         """
-        from .remote_vars import _SafeDisplayProxy, _ensure_sparse_shapes
+        from .remote_vars import _ensure_sparse_shapes, _SafeDisplayProxy
         from .twin import _TWIN_REGISTRY, CapturedFigure, Twin
 
         def unwrap_for_computation(val):
@@ -1466,18 +1476,16 @@ class ComputationRequest:
             import matplotlib.pyplot as plt
 
             # Close ALL existing figures to ensure clean state
-            plt.close('all')
+            plt.close("all")
             original_backend = matplotlib.get_backend()
-            try:
+            with suppress(Exception):
                 matplotlib.use("Agg", force=True)
-            except Exception:
-                pass
             has_matplotlib = True
 
             # Hook plt.show() to capture figures BEFORE they're potentially closed
             original_show = plt.show
 
-            def capturing_show(*args, **kwargs):
+            def capturing_show(*_args, **_kwargs):
                 """Capture all current figures when show() is called."""
                 nonlocal private_figures
                 for fig_num in plt.get_fignums():
@@ -1486,10 +1494,14 @@ class ComputationRequest:
                     try:
                         fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                         buf.seek(0)
-                        private_figures.append(CapturedFigure({
-                            "figure": None,
-                            "png_bytes": buf.getvalue(),
-                        }))
+                        private_figures.append(
+                            CapturedFigure(
+                                {
+                                    "figure": None,
+                                    "png_bytes": buf.getvalue(),
+                                }
+                            )
+                        )
                     except Exception:
                         pass
 
@@ -1522,6 +1534,7 @@ class ComputationRequest:
                     figs = set()
                     try:
                         from matplotlib.axes import Axes
+
                         if isinstance(obj, Axes):
                             if obj.figure:
                                 figs.add(obj.figure)
@@ -1547,19 +1560,21 @@ class ComputationRequest:
                     try:
                         fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                         buf.seek(0)
-                        private_figures.append(CapturedFigure({
-                            "figure": fig,
-                            "png_bytes": buf.getvalue(),
-                        }))
+                        private_figures.append(
+                            CapturedFigure(
+                                {
+                                    "figure": fig,
+                                    "png_bytes": buf.getvalue(),
+                                }
+                            )
+                        )
                     except Exception:
                         pass
                     plt.close(fig)
 
-                plt.close('all')
-                try:
+                plt.close("all")
+                with suppress(Exception):
                     matplotlib.use(original_backend, force=True)
-                except Exception:
-                    pass
 
             private_stdout = stdout_capture.getvalue()
             private_stderr = stderr_capture.getvalue()
@@ -1571,21 +1586,15 @@ class ComputationRequest:
             private_stderr = stderr_capture.getvalue() + f"\n{e}"
             if has_matplotlib:
                 plt.show = original_show
-                plt.close('all')
-                try:
+                plt.close("all")
+                with suppress(Exception):
                     matplotlib.use(original_backend, force=True)
-                except Exception:
-                    pass
 
         print(f"✓ Private result: {type(private_result).__name__}")
 
         # Extract the mock data from the Twin returned by run_mock()
         mock_twin = mock_comp_result.result
-        mock_data = (
-            mock_twin.public
-            if isinstance(mock_twin, Twin)
-            else mock_twin
-        )
+        mock_data = mock_twin.public if isinstance(mock_twin, Twin) else mock_twin
 
         # Handle None results - use sentinel dicts to allow Twin creation
         # Functions that return None (like plotting functions) are valid
@@ -1593,7 +1602,10 @@ class ComputationRequest:
         private_value = private_result
 
         if public_value is None:
-            public_value = {"_none_result": True, "has_figures": len(getattr(mock_twin, 'public_figures', []) or []) > 0}
+            public_value = {
+                "_none_result": True,
+                "has_figures": len(getattr(mock_twin, "public_figures", []) or []) > 0,
+            }
         if private_value is None:
             if private_error:
                 private_value = {"_private_error": True, "error": private_error}
@@ -1669,7 +1681,9 @@ class ComputationRequest:
                 lines.append(f"   • \033[33m{ref}\033[0m")
             if len(global_refs) > 5:
                 lines.append(f"   ... and {len(global_refs) - 5} more")
-            lines.append("   \033[33m💡 This may cause different results on remote execution!\033[0m")
+            lines.append(
+                "   \033[33m💡 This may cause different results on remote execution!\033[0m"
+            )
 
         # Bound Data section - show what data is bound to this action
         data_lines = _describe_bound_data(
@@ -2022,7 +2036,8 @@ def execute_remote_computation(
                 return arg.private
             # Fall back to public if no private (e.g., for mock scenarios)
             if arg.has_public:
-                from .remote_vars import _SafeDisplayProxy, _ensure_sparse_shapes
+                from .remote_vars import _ensure_sparse_shapes, _SafeDisplayProxy
+
                 val = arg.public
                 # Unwrap SafeDisplayProxy to get raw object
                 if isinstance(val, _SafeDisplayProxy):

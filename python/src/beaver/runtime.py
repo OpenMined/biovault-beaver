@@ -6,7 +6,6 @@ import contextlib
 import functools
 import inspect
 import json
-import os
 import re
 import tempfile
 import textwrap
@@ -14,7 +13,7 @@ import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 from uuid import uuid4
 
 try:
@@ -62,7 +61,11 @@ class TrustedLoader:
         def deco(fn):
             entry = cls._handlers.setdefault(
                 typ,
-                {"name": name or f"{typ.__module__}.{typ.__name__}", "serializer": None, "deserializer": None},
+                {
+                    "name": name or f"{typ.__module__}.{typ.__name__}",
+                    "serializer": None,
+                    "deserializer": None,
+                },
             )
             if entry["serializer"] is None:
                 entry["serializer"] = fn
@@ -265,8 +268,10 @@ def _sanitize_for_serialization(obj: Any) -> Any:
     try:
         import matplotlib.figure
         from matplotlib.axes import Axes
+
         if isinstance(obj, matplotlib.figure.Figure):
             import io
+
             buf = io.BytesIO()
             obj.savefig(buf, format="png", bbox_inches="tight", dpi=100)
             buf.seek(0)
@@ -274,6 +279,7 @@ def _sanitize_for_serialization(obj: Any) -> Any:
         if isinstance(obj, Axes):
             if obj.figure:
                 import io
+
                 buf = io.BytesIO()
                 obj.figure.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                 buf.seek(0)
@@ -285,6 +291,7 @@ def _sanitize_for_serialization(obj: Any) -> Any:
     # Handle numpy types
     try:
         import numpy as np
+
         if isinstance(obj, (np.integer,)):
             return int(obj)
         if isinstance(obj, (np.floating,)):
@@ -299,8 +306,9 @@ def _sanitize_for_serialization(obj: Any) -> Any:
     # Handle pandas
     try:
         import pandas as pd
+
         if isinstance(obj, pd.DataFrame):
-            return obj.to_dict(orient='list')
+            return obj.to_dict(orient="list")
         if isinstance(obj, pd.Series):
             return obj.to_dict()
     except ImportError:
@@ -309,8 +317,13 @@ def _sanitize_for_serialization(obj: Any) -> Any:
     # Handle scipy sparse
     try:
         import scipy.sparse
+
         if scipy.sparse.issparse(obj):
-            return obj.toarray().tolist() if obj.nnz < 10000 else {"_sparse_matrix": True, "shape": obj.shape}
+            return (
+                obj.toarray().tolist()
+                if obj.nnz < 10000
+                else {"_sparse_matrix": True, "shape": obj.shape}
+            )
     except ImportError:
         pass
 
@@ -328,16 +341,16 @@ def _sanitize_for_serialization(obj: Any) -> Any:
     if "matplotlib" in type_name:
         return {"_matplotlib_object": True, "type": type_name}
     # Check if object lacks __dict__ (can't be serialized properly)
-    if not hasattr(obj, '__dict__'):
+    if not hasattr(obj, "__dict__"):
         # Has __slots__ but might still be problematic
-        if hasattr(obj, '__slots__'):
-            slots = getattr(obj_type, '__slots__', ())
+        if hasattr(obj, "__slots__"):
+            slots = getattr(obj_type, "__slots__", ())
             if not slots or (isinstance(slots, (list, tuple)) and len(slots) == 0):
                 # Empty slots - object has no data
                 return {"_unserializable": True, "type": type_name}
         else:
             return {"_unserializable": True, "type": type_name}
-    if any(mod in type_name for mod in ('scanpy', 'anndata', 'sklearn')):
+    if any(mod in type_name for mod in ("scanpy", "anndata", "sklearn")):
         return {"_complex_object": True, "type": type_name}
     return obj
 
@@ -370,7 +383,9 @@ def _prepare_for_sending(
         import inspect
 
         src_lines = inspect.getsource(tl["deserializer"]).splitlines()
-        src_clean = "\n".join(line for line in src_lines if not line.lstrip().startswith("@TrustedLoader"))
+        src_clean = "\n".join(
+            line for line in src_lines if not line.lstrip().startswith("@TrustedLoader")
+        )
         src_clean = textwrap.dedent(src_clean)
         return {
             "_trusted_loader": True,
@@ -395,7 +410,9 @@ def _prepare_for_sending(
             import inspect
 
             src_lines = inspect.getsource(tl_pub["deserializer"]).splitlines()
-            src_clean = "\n".join(line for line in src_lines if not line.lstrip().startswith("@TrustedLoader"))
+            src_clean = "\n".join(
+                line for line in src_lines if not line.lstrip().startswith("@TrustedLoader")
+            )
             src_clean = textwrap.dedent(src_clean)
             public_obj = {
                 "_trusted_loader": True,
@@ -416,7 +433,9 @@ def _prepare_for_sending(
                 import inspect
 
                 src_lines = inspect.getsource(tl_priv["deserializer"]).splitlines()
-                src_clean = "\n".join(line for line in src_lines if not line.lstrip().startswith("@TrustedLoader"))
+                src_clean = "\n".join(
+                    line for line in src_lines if not line.lstrip().startswith("@TrustedLoader")
+                )
                 src_clean = textwrap.dedent(src_clean)
                 private_obj = {
                     "_trusted_loader": True,
@@ -427,9 +446,13 @@ def _prepare_for_sending(
 
         # Sanitize values before creating Twin to avoid serialization issues
         # Skip if already a trusted loader dict
-        if public_obj is not None and not (isinstance(public_obj, dict) and public_obj.get("_trusted_loader")):
+        if public_obj is not None and not (
+            isinstance(public_obj, dict) and public_obj.get("_trusted_loader")
+        ):
             public_obj = _sanitize_for_serialization(public_obj)
-        if private_obj is not None and not (isinstance(private_obj, dict) and private_obj.get("_trusted_loader")):
+        if private_obj is not None and not (
+            isinstance(private_obj, dict) and private_obj.get("_trusted_loader")
+        ):
             private_obj = _sanitize_for_serialization(private_obj)
 
         # Create new Twin (with or without private)
@@ -469,7 +492,7 @@ def _prepare_for_sending(
                 return None
             result = []
             for fig_item in figs:
-                if hasattr(fig_item, 'png_bytes'):
+                if hasattr(fig_item, "png_bytes"):
                     # CapturedFigure - extract PNG bytes
                     result.append({"_beaver_figure": True, "png_bytes": fig_item.png_bytes})
                 elif isinstance(fig_item, dict) and fig_item.get("_beaver_figure"):
@@ -486,9 +509,17 @@ def _prepare_for_sending(
 
     # Handle collections containing Twins
     if isinstance(obj, dict):
-        return {k: _prepare_for_sending(v, artifact_dir=artifact_dir, name_hint=k, preserve_private=preserve_private) for k, v in obj.items()}
+        return {
+            k: _prepare_for_sending(
+                v, artifact_dir=artifact_dir, name_hint=k, preserve_private=preserve_private
+            )
+            for k, v in obj.items()
+        }
     if isinstance(obj, (list, tuple)):
-        result = [_prepare_for_sending(item, artifact_dir=artifact_dir, preserve_private=preserve_private) for item in obj]
+        result = [
+            _prepare_for_sending(item, artifact_dir=artifact_dir, preserve_private=preserve_private)
+            for item in obj
+        ]
         return type(obj)(result)
 
     # Return as-is for other types
@@ -516,7 +547,9 @@ def pack(
         preserve_private: If True, include private data in Twins (for approved results)
     """
     # Prepare for sending (optionally strip private data)
-    obj_to_send = _prepare_for_sending(obj, artifact_dir=artifact_dir, name_hint=name, preserve_private=preserve_private)
+    obj_to_send = _prepare_for_sending(
+        obj, artifact_dir=artifact_dir, name_hint=name, preserve_private=preserve_private
+    )
 
     fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
 
@@ -629,23 +662,30 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False) -> Any:
     """
     try:
         from .twin import CapturedFigure, Twin  # local import to avoid cycles
-    except Exception:
-        Twin = None  # type: ignore
-        CapturedFigure = None  # type: ignore
 
-    if Twin is not None and isinstance(obj, Twin):
+        twin_cls = Twin
+        captured_figure_cls = CapturedFigure
+    except Exception:
+        twin_cls = None  # type: ignore
+        captured_figure_cls = None  # type: ignore
+
+    if twin_cls is not None and isinstance(obj, twin_cls):
         obj.public = _resolve_trusted_loader(obj.public, auto_accept=auto_accept)
         obj.private = _resolve_trusted_loader(obj.private, auto_accept=auto_accept)
         # Also resolve captured figure lists (they contain _beaver_figure dicts)
         if hasattr(obj, "public_figures") and obj.public_figures:
-            obj.public_figures = _resolve_trusted_loader(obj.public_figures, auto_accept=auto_accept)
+            obj.public_figures = _resolve_trusted_loader(
+                obj.public_figures, auto_accept=auto_accept
+            )
         if hasattr(obj, "private_figures") and obj.private_figures:
-            obj.private_figures = _resolve_trusted_loader(obj.private_figures, auto_accept=auto_accept)
+            obj.private_figures = _resolve_trusted_loader(
+                obj.private_figures, auto_accept=auto_accept
+            )
         return obj
 
     # Unwrap _beaver_figure dicts back to CapturedFigure for nice Jupyter display
-    if isinstance(obj, dict) and obj.get("_beaver_figure") and CapturedFigure is not None:
-        return CapturedFigure(obj)
+    if isinstance(obj, dict) and obj.get("_beaver_figure") and captured_figure_cls is not None:
+        return captured_figure_cls(obj)
 
     if isinstance(obj, dict) and obj.get("_trusted_loader"):
         name = obj.get("name")
@@ -653,9 +693,13 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False) -> Any:
         src = obj.get("deserializer_src", "")
         preview = "\n".join(src.strip().splitlines()[:5])
         if not auto_accept:
-            resp = input(
-                f"Execute trusted loader '{name}'? [y/N]:\n{preview}\nSource: {data_path}\nProceed? "
-            ).strip().lower()
+            resp = (
+                input(
+                    f"Execute trusted loader '{name}'? [y/N]:\n{preview}\nSource: {data_path}\nProceed? "
+                )
+                .strip()
+                .lower()
+            )
             if resp not in ("y", "yes"):
                 raise RuntimeError("Loader not approved")
         # Build scope with common imports that deserializers might need
@@ -663,6 +707,7 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False) -> Any:
         # Try to import anndata (common for AnnData loaders)
         try:
             import anndata as ad
+
             scope["ad"] = ad
             scope["anndata"] = ad
         except ImportError:
@@ -670,6 +715,7 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False) -> Any:
         # Try to import pandas (common for DataFrame loaders)
         try:
             import pandas as pd
+
             scope["pd"] = pd
             scope["pandas"] = pd
         except ImportError:
@@ -677,14 +723,22 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False) -> Any:
         # Try to import numpy (common dependency)
         try:
             import numpy as np
+
             scope["np"] = np
             scope["numpy"] = np
         except ImportError:
             pass
         exec(src, scope, scope)
         # Exclude TrustedLoader class and imported modules - we want the actual deserializer function
-        excluded = {TrustedLoader, scope.get("ad"), scope.get("pd"), scope.get("np"),
-                    scope.get("anndata"), scope.get("pandas"), scope.get("numpy")}
+        excluded = {
+            TrustedLoader,
+            scope.get("ad"),
+            scope.get("pd"),
+            scope.get("np"),
+            scope.get("anndata"),
+            scope.get("pandas"),
+            scope.get("numpy"),
+        }
         deser_fn = next((v for v in scope.values() if callable(v) and v not in excluded), None)
         if deser_fn is None:
             raise RuntimeError("No deserializer found in loader source")
@@ -1224,7 +1278,7 @@ def export(
             # If Twins detected, return Twin result
             if has_twin:
                 # Execute on public data immediately with output capture
-                from .remote_vars import _SafeDisplayProxy, _ensure_sparse_shapes
+                from .remote_vars import _ensure_sparse_shapes, _SafeDisplayProxy
 
                 def unwrap_for_computation(val):
                     """Unwrap display proxies and ensure sparse shapes."""
@@ -1243,7 +1297,6 @@ def export(
 
                 # Capture stdout, stderr, and matplotlib figures
                 import io
-                import sys
                 from contextlib import redirect_stderr, redirect_stdout
 
                 stdout_capture = io.StringIO()
@@ -1254,6 +1307,7 @@ def export(
                 try:
                     import matplotlib
                     import matplotlib.pyplot as plt
+
                     from .twin import CapturedFigure
 
                     # Store existing figure numbers to know which are new
@@ -1261,18 +1315,16 @@ def export(
 
                     # Use non-interactive backend temporarily to prevent auto-display
                     original_backend = matplotlib.get_backend()
-                    try:
+                    with contextlib.suppress(Exception):
                         # Agg is a non-interactive backend that won't display
                         matplotlib.use("Agg", force=True)
-                    except Exception:
-                        pass
 
                     has_matplotlib = True
 
                     # Hook plt.show() to capture figures BEFORE they're closed
                     original_show = plt.show
 
-                    def capturing_show(*args, **kwargs):
+                    def capturing_show(*_args, **_kwargs):
                         """Capture all current figures when show() is called."""
                         nonlocal captured_figures
                         for fig_num in plt.get_fignums():
@@ -1282,10 +1334,14 @@ def export(
                                 try:
                                     fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                                     buf.seek(0)
-                                    captured_figures.append(CapturedFigure({
-                                        "figure": None,
-                                        "png_bytes": buf.getvalue(),
-                                    }))
+                                    captured_figures.append(
+                                        CapturedFigure(
+                                            {
+                                                "figure": None,
+                                                "png_bytes": buf.getvalue(),
+                                            }
+                                        )
+                                    )
                                 except Exception:
                                     pass
                         # Don't call original show - we're in Agg backend
@@ -1320,6 +1376,7 @@ def export(
                             figs = set()
                             try:
                                 from matplotlib.axes import Axes
+
                                 if isinstance(obj, Axes):
                                     if obj.figure and obj.figure.number not in existing_figs:
                                         figs.add(obj.figure)
@@ -1345,19 +1402,21 @@ def export(
                             try:
                                 fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                                 buf.seek(0)
-                                captured_figures.append(CapturedFigure({
-                                    "figure": fig,
-                                    "png_bytes": buf.getvalue(),
-                                }))
+                                captured_figures.append(
+                                    CapturedFigure(
+                                        {
+                                            "figure": fig,
+                                            "png_bytes": buf.getvalue(),
+                                        }
+                                    )
+                                )
                             except Exception:
                                 pass
                             plt.close(fig)
 
-                        plt.close('all')
-                        try:
+                        plt.close("all")
+                        with contextlib.suppress(Exception):
                             matplotlib.use(original_backend, force=True)
-                        except Exception:
-                            pass
 
                     public_stdout = stdout_capture.getvalue()
                     public_stderr = stderr_capture.getvalue()
@@ -1370,11 +1429,9 @@ def export(
                     # Restore backend and show on error too
                     if has_matplotlib:
                         plt.show = original_show
-                        plt.close('all')
-                        try:
+                        plt.close("all")
+                        with contextlib.suppress(Exception):
                             matplotlib.use(original_backend, force=True)
-                        except Exception:
-                            pass
 
                 # Create ComputationRequest for private execution
                 comp_id = uuid4().hex

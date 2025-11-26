@@ -18,6 +18,7 @@ from .computation import (
     execute_remote_computation,
 )
 from .envelope import BeaverEnvelope
+from .lib_support import register_builtin_loader
 from .policy import (
     PERMISSIVE_POLICY,
     STRICT_POLICY,
@@ -63,6 +64,7 @@ __all__ = [
     "RemoteVar",
     "RemoteVarRegistry",
     "RemoteVarView",
+    "register_builtin_loader",
     "StagingArea",
     "SendResult",
     "TrustedLoader",

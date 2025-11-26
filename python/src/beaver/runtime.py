@@ -308,9 +308,9 @@ def _sanitize_for_serialization(obj: Any) -> Any:
         import pandas as pd
 
         if isinstance(obj, pd.DataFrame):
-            return obj.to_dict(orient="list")
+            return {"_beaver_dataframe": True, "data": obj.to_dict(orient="list")}
         if isinstance(obj, pd.Series):
-            return obj.to_dict()
+            return {"_beaver_series": True, "data": obj.to_dict(), "name": obj.name}
     except ImportError:
         pass
 
@@ -361,6 +361,8 @@ def _prepare_for_sending(
     artifact_dir: Optional[Path] = None,
     name_hint: Optional[str] = None,
     preserve_private: bool = False,
+    backend=None,
+    recipients: Optional[list] = None,
 ) -> Any:
     """Prepare object for sending by handling trusted loaders and optionally stripping private data.
 
@@ -369,8 +371,32 @@ def _prepare_for_sending(
         artifact_dir: Directory for trusted loader artifacts
         name_hint: Name hint for artifacts
         preserve_private: If True, keep private data in Twins (for approved results)
+        backend: Optional SyftBoxBackend for encrypted writes
+        recipients: Optional list of recipient emails for encryption
     """
     from .twin import Twin
+
+    def _write_artifact_encrypted(serializer, obj_to_write, path, backend, recipients):
+        """Write artifact using TrustedLoader serializer, optionally encrypting."""
+        if backend and backend.uses_crypto and recipients:
+            # Write to temp file first, then encrypt
+            temp_path = Path(tempfile.gettempdir()) / f"_beaver_tmp_{uuid4().hex}.bin"
+            try:
+                serializer(obj_to_write, temp_path)
+                data = temp_path.read_bytes()
+                backend.storage.write_with_shadow(
+                    absolute_path=str(path),
+                    data=data,
+                    recipients=recipients,
+                    hint="trusted-loader-artifact",
+                    overwrite=True,
+                )
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink()
+        else:
+            # Direct write (no encryption)
+            serializer(obj_to_write, path)
 
     # Trusted loader conversion (non-Twin)
     tl = TrustedLoader.get(type(obj))
@@ -379,7 +405,7 @@ def _prepare_for_sending(
         target_dir.mkdir(parents=True, exist_ok=True)
         base = name_hint or tl["name"].split(".")[-1] or "artifact"
         path = target_dir / f"{base}.bin"
-        tl["serializer"](obj, path)
+        _write_artifact_encrypted(tl["serializer"], obj, path, backend, recipients)
         import inspect
 
         src_lines = inspect.getsource(tl["deserializer"]).splitlines()
@@ -406,7 +432,7 @@ def _prepare_for_sending(
             target_dir.mkdir(parents=True, exist_ok=True)
             base = name_hint or getattr(public_obj, "name", None) or "artifact"
             path = target_dir / f"{base}_public.bin"
-            tl_pub["serializer"](public_obj, path)
+            _write_artifact_encrypted(tl_pub["serializer"], public_obj, path, backend, recipients)
             import inspect
 
             src_lines = inspect.getsource(tl_pub["deserializer"]).splitlines()
@@ -429,7 +455,7 @@ def _prepare_for_sending(
                 target_dir.mkdir(parents=True, exist_ok=True)
                 base = name_hint or getattr(private_obj, "name", None) or "artifact"
                 path = target_dir / f"{base}_private.bin"
-                tl_priv["serializer"](private_obj, path)
+                _write_artifact_encrypted(tl_priv["serializer"], private_obj, path, backend, recipients)
                 import inspect
 
                 src_lines = inspect.getsource(tl_priv["deserializer"]).splitlines()
@@ -511,13 +537,24 @@ def _prepare_for_sending(
     if isinstance(obj, dict):
         return {
             k: _prepare_for_sending(
-                v, artifact_dir=artifact_dir, name_hint=k, preserve_private=preserve_private
+                v,
+                artifact_dir=artifact_dir,
+                name_hint=k,
+                preserve_private=preserve_private,
+                backend=backend,
+                recipients=recipients,
             )
             for k, v in obj.items()
         }
     if isinstance(obj, (list, tuple)):
         result = [
-            _prepare_for_sending(item, artifact_dir=artifact_dir, preserve_private=preserve_private)
+            _prepare_for_sending(
+                item,
+                artifact_dir=artifact_dir,
+                preserve_private=preserve_private,
+                backend=backend,
+                recipients=recipients,
+            )
             for item in obj
         ]
         return type(obj)(result)
@@ -540,15 +577,24 @@ def pack(
     policy=None,
     artifact_dir: Optional[Path | str] = None,
     preserve_private: bool = False,
+    backend=None,
+    recipients: Optional[list] = None,
 ) -> BeaverEnvelope:
     """Serialize an object into a BeaverEnvelope (Python-native).
 
     Args:
         preserve_private: If True, include private data in Twins (for approved results)
+        backend: Optional SyftBoxBackend for encrypted artifact writes
+        recipients: Optional list of recipient emails for encryption
     """
     # Prepare for sending (optionally strip private data)
     obj_to_send = _prepare_for_sending(
-        obj, artifact_dir=artifact_dir, name_hint=name, preserve_private=preserve_private
+        obj,
+        artifact_dir=artifact_dir,
+        name_hint=name,
+        preserve_private=preserve_private,
+        backend=backend,
+        recipients=recipients,
     )
 
     fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
@@ -628,6 +674,7 @@ def unpack(
     strict: bool = False,
     policy=None,
     auto_accept: bool = False,
+    backend=None,
 ) -> Any:
     """Deserialize the payload in a BeaverEnvelope.
 
@@ -636,6 +683,7 @@ def unpack(
         strict: Strict deserialization mode
         policy: Deserialization policy
         auto_accept: If True, automatically accept trusted loaders without prompting
+        backend: Optional SyftBoxBackend for reading encrypted artifact files
     """
     _install_builtin_aliases()
     fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
@@ -646,11 +694,11 @@ def unpack(
     fory.register_type(Twin)
 
     obj = fory.loads(envelope.payload)
-    obj = _resolve_trusted_loader(obj, auto_accept=auto_accept)
+    obj = _resolve_trusted_loader(obj, auto_accept=auto_accept, backend=backend)
     return obj
 
 
-def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False) -> Any:
+def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None) -> Any:
     """
     Resolve trusted-loader descriptors, prompting before execution.
 
@@ -659,6 +707,7 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False) -> Any:
     Args:
         obj: The object to resolve
         auto_accept: If True, automatically accept trusted loaders without prompting
+        backend: Optional SyftBoxBackend for reading encrypted artifact files
     """
     try:
         from .twin import CapturedFigure, Twin  # local import to avoid cycles
@@ -670,16 +719,16 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False) -> Any:
         captured_figure_cls = None  # type: ignore
 
     if twin_cls is not None and isinstance(obj, twin_cls):
-        obj.public = _resolve_trusted_loader(obj.public, auto_accept=auto_accept)
-        obj.private = _resolve_trusted_loader(obj.private, auto_accept=auto_accept)
+        obj.public = _resolve_trusted_loader(obj.public, auto_accept=auto_accept, backend=backend)
+        obj.private = _resolve_trusted_loader(obj.private, auto_accept=auto_accept, backend=backend)
         # Also resolve captured figure lists (they contain _beaver_figure dicts)
         if hasattr(obj, "public_figures") and obj.public_figures:
             obj.public_figures = _resolve_trusted_loader(
-                obj.public_figures, auto_accept=auto_accept
+                obj.public_figures, auto_accept=auto_accept, backend=backend
             )
         if hasattr(obj, "private_figures") and obj.private_figures:
             obj.private_figures = _resolve_trusted_loader(
-                obj.private_figures, auto_accept=auto_accept
+                obj.private_figures, auto_accept=auto_accept, backend=backend
             )
         return obj
 
@@ -687,10 +736,47 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False) -> Any:
     if isinstance(obj, dict) and obj.get("_beaver_figure") and captured_figure_cls is not None:
         return captured_figure_cls(obj)
 
+    # Reconstruct pandas DataFrame from serialized dict
+    if isinstance(obj, dict) and obj.get("_beaver_dataframe"):
+        try:
+            import pandas as pd
+            return pd.DataFrame(obj["data"])
+        except ImportError:
+            # pandas not available, return the raw data
+            return obj["data"]
+
+    # Reconstruct pandas Series from serialized dict
+    if isinstance(obj, dict) and obj.get("_beaver_series"):
+        try:
+            import pandas as pd
+            return pd.Series(obj["data"], name=obj.get("name"))
+        except ImportError:
+            # pandas not available, return the raw data
+            return obj["data"]
+
     if isinstance(obj, dict) and obj.get("_trusted_loader"):
         name = obj.get("name")
         data_path = obj.get("path")
         src = obj.get("deserializer_src", "")
+
+        # Translate path from sender's perspective to local view
+        # If path contains /datasites/<identity>/, map to our local view
+        # ALWAYS translate when backend is available - file is synced to our local view
+        if data_path and backend:
+            import re
+            # Match paths like .../datasites/<email>/shared/...
+            match = re.search(r'/datasites/([^/]+)/(shared|app_data|public)/', data_path)
+            if match:
+                datasite_identity = match.group(1)
+                # Get path after the datasite identity
+                idx = data_path.find(f'/datasites/{datasite_identity}/')
+                if idx >= 0:
+                    relative_path = data_path[idx + len(f'/datasites/'):]
+                    # Translate to our local datasites folder
+                    translated = str(backend.data_dir / "datasites" / relative_path)
+                    # Always use translated path - file should be synced to our local view
+                    data_path = translated
+
         preview = "\n".join(src.strip().splitlines()[:5])
         if not auto_accept:
             resp = (
@@ -742,14 +828,59 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False) -> Any:
         deser_fn = next((v for v in scope.values() if callable(v) and v not in excluded), None)
         if deser_fn is None:
             raise RuntimeError("No deserializer found in loader source")
-        return deser_fn(data_path)
+
+        # If backend is available and uses crypto, read through backend (decrypts) and write to temp
+        actual_path = data_path
+        temp_file = None
+        if backend and backend.uses_crypto:
+            # Wait for file to appear (sync in progress) with timeout
+            import time as _time
+            sync_timeout = 30.0  # seconds to wait for sync
+            sync_poll = 1.0  # poll interval
+            sync_deadline = _time.monotonic() + sync_timeout
+            waited = False
+
+            while not Path(data_path).exists():
+                if _time.monotonic() >= sync_deadline:
+                    raise RuntimeError(
+                        f"Artifact file not found at {data_path} after waiting {sync_timeout}s. "
+                        f"File may still be syncing - try again later."
+                    )
+                if not waited:
+                    print(f"⏳ Waiting for artifact file to sync: {Path(data_path).name}")
+                    waited = True
+                _time.sleep(sync_poll)
+
+            if waited:
+                print(f"✓ Artifact file synced: {Path(data_path).name}")
+
+            # File exists, decrypt it
+            try:
+                data = backend.read_bytes(data_path)
+                temp_file = Path(tempfile.gettempdir()) / f"_beaver_read_{uuid4().hex}.bin"
+                temp_file.write_bytes(data)
+                actual_path = str(temp_file)
+            except Exception as e:
+                # Log the error but still try to decrypt - the file is encrypted
+                import beaver
+                if beaver.debug:
+                    print(f"[DEBUG] Failed to decrypt {data_path}: {e}")
+                # Don't fall back to direct read for encrypted files
+                raise RuntimeError(f"Failed to decrypt artifact file {data_path}: {e}") from e
+
+        try:
+            return deser_fn(actual_path)
+        finally:
+            # Clean up temp file
+            if temp_file and temp_file.exists():
+                temp_file.unlink()
 
     if isinstance(obj, list):
-        return [_resolve_trusted_loader(x, auto_accept=auto_accept) for x in obj]
+        return [_resolve_trusted_loader(x, auto_accept=auto_accept, backend=backend) for x in obj]
     if isinstance(obj, tuple):
-        return tuple(_resolve_trusted_loader(x, auto_accept=auto_accept) for x in obj)
+        return tuple(_resolve_trusted_loader(x, auto_accept=auto_accept, backend=backend) for x in obj)
     if isinstance(obj, dict):
-        return {k: _resolve_trusted_loader(v, auto_accept=auto_accept) for k, v in obj.items()}
+        return {k: _resolve_trusted_loader(v, auto_accept=auto_accept, backend=backend) for k, v in obj.items()}
     return obj
 
 
@@ -921,9 +1052,17 @@ def list_inbox(inbox: Path | str) -> list[BeaverEnvelope]:
 class InboxView:
     """Wrapper to pretty-print an inbox as a table in notebooks."""
 
-    def __init__(self, inbox: Path | str, envelopes: list[BeaverEnvelope]) -> None:
+    def __init__(
+        self, inbox: Path | str, envelopes: list[BeaverEnvelope], session=None
+    ) -> None:
         self.inbox = Path(inbox)
         self.envelopes = envelopes
+        self.session = session  # Session reference for session-scoped inboxes
+
+        # Attach session to each envelope so loaded objects get session context
+        if session is not None:
+            for env in self.envelopes:
+                env._session = session
 
     def __len__(self) -> int:
         return len(self.envelopes)
@@ -1572,8 +1711,27 @@ class UserRemoteVars:
         if self._remote_vars_view is None:
             from .remote_vars import RemoteVarView
 
-            registry_path = self.context._public_dir / self.username / "remote_vars.json"
-            data_dir = self.context._base_dir / self.username
+            if self.context._backend:
+                # SyftBox mode: peer's data is in datasites/<peer>/shared/
+                registry_path = (
+                    self.context._backend.data_dir
+                    / "datasites"
+                    / self.username
+                    / "shared"
+                    / "public"
+                    / "remote_vars.json"
+                )
+                data_dir = (
+                    self.context._backend.data_dir
+                    / "datasites"
+                    / self.username
+                    / "shared"
+                    / "biovault"
+                )
+            else:
+                # Legacy mode
+                registry_path = self.context._public_dir / self.username / "remote_vars.json"
+                data_dir = self.context._base_dir / self.username
 
             self._remote_vars_view = RemoteVarView(
                 remote_user=self.username,
@@ -1599,6 +1757,7 @@ class BeaverContext:
         policy=None,
         auto_load_replies: bool = True,
         poll_interval: float = 2.0,
+        _backend=None,  # SyftBoxBackend instance for encrypted mode
     ) -> None:
         self.inbox_path = Path(inbox)
         self.outbox = Path(outbox) if outbox is not None else self.inbox_path
@@ -1607,15 +1766,25 @@ class BeaverContext:
         self.strict = strict
         self.policy = policy
 
+        # SyftBox backend (None for legacy filesystem mode)
+        self._backend = _backend
+
         # Settings
         from .settings import BeaverSettings
 
         self._settings = BeaverSettings()
 
         # Remote vars setup
-        self._base_dir = self.inbox_path.parent.parent  # shared/
-        self._public_dir = self._base_dir / "shared" / "public"
-        self._registry_path = self._public_dir / self.user / "remote_vars.json"
+        if self._backend:
+            # SyftBox mode: use backend's data_dir structure
+            self._base_dir = self._backend.data_dir
+            self._public_dir = self._base_dir / "datasites" / self.user / "shared" / "public"
+            self._registry_path = self._public_dir / "remote_vars.json"
+        else:
+            # Legacy mode
+            self._base_dir = self.inbox_path.parent.parent  # shared/
+            self._public_dir = self._base_dir / "shared" / "public"
+            self._registry_path = self._public_dir / self.user / "remote_vars.json"
         self._remote_vars_registry = None
 
         # Staging area for remote computations
@@ -1641,6 +1810,21 @@ class BeaverContext:
             BeaverSettings object for managing configuration
         """
         return self._settings
+
+    @property
+    def syftbox_enabled(self) -> bool:
+        """Check if SyftBox encrypted mode is enabled."""
+        return self._backend is not None
+
+    @property
+    def backend(self):
+        """
+        Access the SyftBox backend (if enabled).
+
+        Returns:
+            SyftBoxBackend instance or None
+        """
+        return self._backend
 
     @property
     def remote_vars(self):
@@ -1716,6 +1900,174 @@ class BeaverContext:
     def send_staged(self):
         """Send all staged computations."""
         self.staged.send_all()
+
+    # -------------------------------------------------------------------------
+    # Session Management
+    # -------------------------------------------------------------------------
+
+    def session_requests(self):
+        """
+        List pending session requests from other users.
+
+        Returns:
+            SessionRequestsView with pending requests that can be accepted/rejected
+
+        Example:
+            requests = bv.session_requests()
+            requests[0].accept()  # Accept first request
+        """
+        from .session import SessionRequestsView
+
+        if self._backend is None:
+            print("⚠️  Session management requires SyftBox mode")
+            return SessionRequestsView([])
+
+        requests = self._backend.list_session_requests()
+
+        # Bind context to each request so .accept() works
+        for req in requests:
+            req._context = self
+
+        return SessionRequestsView(requests)
+
+    def request_session(
+        self,
+        peer_email: str,
+        message: Optional[str] = None,
+    ):
+        """
+        Request a new session with a data owner.
+
+        Args:
+            peer_email: Email of the data owner
+            message: Optional message to include with request
+
+        Returns:
+            Session object (in pending state until accepted)
+
+        Example:
+            session = bv.request_session("client1@sandbox.local")
+            session.wait_for_acceptance()
+        """
+        from .session import Session, _generate_session_id
+
+        if self._backend is None:
+            raise RuntimeError("Session management requires SyftBox mode")
+
+        # Generate session ID
+        session_id = _generate_session_id()
+
+        # Send request via RPC
+        self._backend.send_session_request(
+            session_id=session_id,
+            target_email=peer_email,
+            message=message,
+        )
+
+        # Create local session object
+        session = Session(
+            session_id=session_id,
+            peer=peer_email,
+            owner=self.user,
+            role="requester",
+            status="pending",
+        )
+        session._context = self
+
+        print(f"📤 Session request sent to {peer_email}")
+        print(f"   Session ID: {session_id}")
+        print(f"   Use session.wait_for_acceptance() to wait for approval")
+
+        return session
+
+    def accept_session(self, request_or_id) -> "Session":
+        """
+        Accept a session request.
+
+        Args:
+            request_or_id: SessionRequest object, session ID string, or requester email
+
+        Returns:
+            Session object for the accepted session
+
+        Example:
+            # Accept by request object
+            bv.session_requests()[0].accept()
+
+            # Accept by session ID
+            bv.accept_session("abc123")
+
+            # Accept by requester email
+            bv.accept_session("client2@sandbox.local")
+        """
+        from .session import Session, SessionRequest
+
+        if self._backend is None:
+            raise RuntimeError("Session management requires SyftBox mode")
+
+        # Resolve the request
+        if isinstance(request_or_id, SessionRequest):
+            request = request_or_id
+        elif isinstance(request_or_id, str):
+            # Find by ID or email
+            requests = self._backend.list_session_requests()
+            request = None
+            for req in requests:
+                if req.session_id == request_or_id or req.session_id.startswith(request_or_id):
+                    request = req
+                    break
+                if req.requester == request_or_id:
+                    request = req
+                    break
+
+            if request is None:
+                raise KeyError(f"No pending session request matching: {request_or_id}")
+        else:
+            raise TypeError(f"Expected SessionRequest or str, got {type(request_or_id)}")
+
+        # Send acceptance response
+        self._backend.send_session_response(
+            session_id=request.session_id,
+            requester_email=request.requester,
+            accepted=True,
+        )
+
+        # Create session folder
+        self._backend.create_session_folder(
+            session_id=request.session_id,
+            peer_email=request.requester,
+        )
+
+        # Create local session object
+        session = Session(
+            session_id=request.session_id,
+            peer=request.requester,
+            owner=self.user,
+            role="accepter",
+            status="active",
+        )
+        session._context = self
+        session._setup_paths()
+
+        print(f"✅ Session accepted: {request.session_id}")
+        print(f"   Peer: {request.requester}")
+        print(f"   Session folder: {session.local_folder}")
+
+        return session
+
+    def _reject_session(self, request, reason: Optional[str] = None) -> None:
+        """Reject a session request (internal)."""
+        if self._backend is None:
+            raise RuntimeError("Session management requires SyftBox mode")
+
+        self._backend.send_session_response(
+            session_id=request.session_id,
+            requester_email=request.requester,
+            accepted=False,
+            reason=reason,
+        )
+
+        print(f"❌ Session rejected: {request.session_id}")
 
     def start_auto_load(self):
         """Start auto-loading replies in background."""
@@ -1892,7 +2244,16 @@ class BeaverContext:
                 out_dir = base / to_user
             else:
                 out_dir = self.outbox
-        path = write_envelope(env, out_dir=out_dir)
+
+        # Use encrypted backend if available, otherwise plain write
+        if self._backend and to_user:
+            # Encrypt for the recipient
+            path = self._backend.write_envelope(
+                envelope=env,
+                recipients=[to_user],
+            )
+        else:
+            path = write_envelope(env, out_dir=out_dir)
         return SendResult(path=path, envelope=env)
 
     def reply(self, obj: Any, *, to_id: str, **kwargs) -> Path:
@@ -2123,7 +2484,7 @@ class BeaverContext:
 
 
 def connect(
-    folder: Path | str,
+    folder: Optional[Path | str] = None,
     *,
     user: str = "unknown",
     biovault: Optional[str] = None,
@@ -2133,13 +2494,18 @@ def connect(
     policy=None,
     auto_load_replies: bool = True,
     poll_interval: float = 2.0,
+    # SyftBox parameters
+    syftbox: bool = True,  # Default to SyftBox mode
+    data_dir: Optional[Path | str] = None,
+    vault_path: Optional[Path | str] = None,
+    disable_crypto: bool = False,
 ) -> BeaverContext:
     """
     Create a BeaverContext with shared defaults.
 
     Args:
-        folder: Base directory for shared files
-        user: Username for this context
+        folder: Base directory for shared files (only used if syftbox=False)
+        user: Username/email for this context (e.g., "client1@sandbox.local")
         biovault: Optional biovault identifier
         inbox: Inbox directory (defaults to folder/user)
         outbox: Outbox directory (defaults to inbox)
@@ -2148,18 +2514,75 @@ def connect(
         auto_load_replies: Auto-load computation replies (default: True)
         poll_interval: How often to check for replies in seconds (default: 2.0)
 
+        # SyftBox parameters (for encrypted mode):
+        syftbox: Enable SyftBox backend for encrypted sync (default: True)
+        data_dir: SyftBox data directory (contains datasites/, .syc/)
+        vault_path: Override .syc vault location
+        disable_crypto: Disable encryption for testing (default: False)
+
     Returns:
         BeaverContext with auto-loading enabled
+
+    Examples:
+        # SyftBox encrypted mode (default)
+        bv = beaver.connect(
+            user="client1@sandbox.local",
+            data_dir=Path.cwd(),
+        )
+
+        # Legacy filesystem mode
+        bv = beaver.connect("shared", user="bob", syftbox=False)
     """
-    base = Path(folder)
-    user_subdir = base / user if user else base
-    return BeaverContext(
-        inbox=inbox if inbox is not None else user_subdir,
-        outbox=outbox if outbox is not None else user_subdir,
-        user=user,
-        biovault=biovault,
-        strict=strict,
-        policy=policy,
-        auto_load_replies=auto_load_replies,
-        poll_interval=poll_interval,
-    )
+    if syftbox:
+        # SyftBox encrypted mode
+        if data_dir is None:
+            raise ValueError("data_dir is required when syftbox=True")
+
+        # Auto-detect email from SyftBox config if not provided
+        effective_user = user
+        if user == "unknown":
+            config_path = Path(data_dir) / ".syftbox" / "config.json"
+            if config_path.exists():
+                import json
+                try:
+                    config = json.loads(config_path.read_text())
+                    effective_user = config.get("email", user)
+                except Exception:
+                    pass
+
+        from .syftbox_backend import SyftBoxBackend
+
+        backend = SyftBoxBackend(
+            data_dir=data_dir,
+            email=effective_user,
+            vault_path=vault_path,
+            disable_crypto=disable_crypto,
+        )
+
+        return BeaverContext(
+            inbox=backend.shared_path,
+            outbox=backend.shared_path,
+            user=effective_user,
+            biovault=biovault,
+            strict=strict,
+            policy=policy,
+            auto_load_replies=auto_load_replies,
+            poll_interval=poll_interval,
+            _backend=backend,
+        )
+    else:
+        # Legacy filesystem mode
+        if folder is None:
+            raise ValueError("folder is required when syftbox=False")
+        base = Path(folder)
+        user_subdir = base / user if user else base
+        return BeaverContext(
+            inbox=inbox if inbox is not None else user_subdir,
+            outbox=outbox if outbox is not None else user_subdir,
+            user=user,
+            biovault=biovault,
+            strict=strict,
+            policy=policy,
+            auto_load_replies=auto_load_replies,
+            poll_interval=poll_interval,
+        )

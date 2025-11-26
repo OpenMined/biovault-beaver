@@ -496,8 +496,15 @@ class Twin(LiveMixin, RemoteData):
                 name=default_request_name,
             )
 
-            # Send to owner's inbox
-            dest_dir = Path(context.outbox).parent / self.owner
+            # Determine destination: use session folder if available, otherwise fall back
+            if hasattr(self, "_session") and self._session is not None:
+                # Write to our session folder (peer can read it via sync)
+                dest_dir = self._session.local_folder
+                print(f"📤 Writing to session folder: {dest_dir}")
+            else:
+                # Fallback: send to owner's shared folder (legacy path)
+                dest_dir = Path(context.outbox).parent / self.owner
+
             path = write_envelope(env, out_dir=dest_dir)
 
             print(f"✓ Sent to {path}")

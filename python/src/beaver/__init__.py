@@ -1,5 +1,9 @@
 """Lightweight notebook-to-notebook ferry for Python objects using Fory."""
 
+# Debug flag for beaver output
+# Also controls SyftBox SDK debug output when using SyftBoxBackend
+debug = False
+
 # Enable matplotlib inline mode by default in Jupyter/IPython
 try:
     from IPython import get_ipython
@@ -25,6 +29,7 @@ from .policy import (
     BeaverPolicy,
 )
 from .remote_vars import RemoteVar, RemoteVarRegistry, RemoteVarView
+from .session import Session, SessionRequest, SessionRequestsView
 from .runtime import (
     BeaverContext,
     InboxView,
@@ -48,6 +53,21 @@ from .runtime import (
 from .twin import CapturedFigure, Twin
 from .twin_result import TwinComputationResult
 
+# SyftBox integration (optional - requires syftbox-sdk)
+try:
+    from .syftbox_backend import (
+        SyftBoxBackend,
+        import_peer_bundle,
+        provision_identity,
+    )
+
+    _SYFTBOX_AVAILABLE = True
+except ImportError:
+    _SYFTBOX_AVAILABLE = False
+    SyftBoxBackend = None  # type: ignore
+    import_peer_bundle = None  # type: ignore
+    provision_identity = None  # type: ignore
+
 __version__ = "0.1.23"
 __all__ = [
     "BeaverEnvelope",
@@ -63,8 +83,12 @@ __all__ = [
     "RemoteVar",
     "RemoteVarRegistry",
     "RemoteVarView",
+    "Session",
+    "SessionRequest",
+    "SessionRequestsView",
     "StagingArea",
     "SendResult",
+    "SyftBoxBackend",
     "TrustedLoader",
     "Twin",
     "TwinComputationResult",
@@ -72,9 +96,11 @@ __all__ = [
     "execute_remote_computation",
     "export",
     "find_by_id",
+    "import_peer_bundle",
     "load_by_id",
     "listen_once",
     "pack",
+    "provision_identity",
     "read_envelope",
     "unpack",
     "wait_for_reply",

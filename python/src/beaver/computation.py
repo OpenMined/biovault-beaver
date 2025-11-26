@@ -247,6 +247,7 @@ class ComputationResult:
     comp_id: str
     sender: str
     context: Any = None
+    session: Any = None  # Session reference for session-scoped results
 
     @property
     def data(self):
@@ -439,15 +440,27 @@ class ComputationResult:
             "rejected_at": _iso_now(),
         }
 
-        # Send rejection back
-        result = self.context.send(
-            rejection,
-            name=f"rejection_{self.var_name}",
-            user=self.sender,
-            reply_to=self.comp_id,
-        )
+        # Send rejection back - use session folder if available
+        if self.session is not None:
+            from .runtime import pack, write_envelope
 
-        print(f"✓ Rejection sent to {self.sender}'s inbox")
+            env = pack(
+                rejection,
+                sender=self.context.user,
+                name=f"rejection_{self.var_name}",
+                reply_to=self.comp_id,
+            )
+            dest_dir = self.session.local_folder
+            result = write_envelope(env, out_dir=dest_dir)
+            print(f"✓ Rejection sent to session folder: {dest_dir}")
+        else:
+            result = self.context.send(
+                rejection,
+                name=f"rejection_{self.var_name}",
+                user=self.sender,
+                reply_to=self.comp_id,
+            )
+            print(f"✓ Rejection sent to {self.sender}'s inbox")
         return result
 
     def _send_result(
@@ -671,15 +684,73 @@ class ComputationResult:
                 result_twin.private_figures = convert_figures_for_sending(captured_figures)
 
         # Send the result Twin back as a reply
-        result = self.context.send(
-            result_twin,
-            name=self.var_name,
-            user=self.sender,
-            reply_to=self.comp_id,
-            preserve_private=True,
-        )
+        # Use session folder if available, otherwise fall back to user inbox
+        if self.session is not None:
+            # Write to our session folder (peer can read it via sync)
+            from .runtime import pack, write_envelope
 
-        print(f"✓ Result sent to {self.sender}'s inbox")
+            dest_dir = self.session.local_folder
+
+            # Determine backend and recipients for encryption
+            # In SyftBox, data is encrypted FOR THE RECIPIENT (peer) only
+            backend = None
+            recipients = None
+            if self.context and hasattr(self.context, "_backend") and self.context._backend:
+                backend = self.context._backend
+                if backend.uses_crypto:
+                    # Encrypt for the sender who requested the computation
+                    recipients = [self.sender]
+
+            env = pack(
+                result_twin,
+                sender=self.context.user,
+                name=self.var_name,
+                reply_to=self.comp_id,
+                artifact_dir=dest_dir,
+                backend=backend,
+                recipients=recipients,
+            )
+
+            # Write envelope (encrypted if backend available)
+            if backend and backend.uses_crypto and recipients:
+                import json
+                import base64
+                record = {
+                    "version": env.version,
+                    "envelope_id": env.envelope_id,
+                    "sender": env.sender,
+                    "created_at": env.created_at,
+                    "name": env.name,
+                    "inputs": env.inputs,
+                    "outputs": env.outputs,
+                    "requirements": env.requirements,
+                    "manifest": env.manifest,
+                    "reply_to": env.reply_to,
+                    "payload_b64": base64.b64encode(env.payload).decode("ascii"),
+                }
+                content = json.dumps(record, indent=2).encode("utf-8")
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                data_path = dest_dir / env.filename()
+                backend.storage.write_with_shadow(
+                    str(data_path),
+                    content,
+                    recipients=recipients,
+                    hint="beaver-envelope",
+                )
+                result = data_path
+            else:
+                result = write_envelope(env, out_dir=dest_dir)
+            print(f"✓ Result sent to session folder: {dest_dir}")
+        else:
+            # Fallback: send to user's inbox (legacy path)
+            result = self.context.send(
+                result_twin,
+                name=self.var_name,
+                user=self.sender,
+                reply_to=self.comp_id,
+                preserve_private=True,
+            )
+            print(f"✓ Result sent to {self.sender}'s inbox")
         print(f"💡 They can load it with: bv.inbox()['{self.var_name}'].load()")
 
         return result
@@ -885,6 +956,8 @@ class ComputationRequest:
             print(f"✓ Result: {type(result_data['result']).__name__}")
 
         # Return a ComputationResult object instead of raw dict
+        # Pass session reference if we have one
+        session = getattr(self, "_session", None)
         return ComputationResult(
             result=result_data["result"],
             stdout=result_data["stdout"],
@@ -895,6 +968,7 @@ class ComputationRequest:
             comp_id=self.comp_id,
             sender=self.sender,
             context=context,
+            session=session,
         )
 
     def run(self, context=None):
@@ -1115,7 +1189,8 @@ class ComputationRequest:
         # Store for later retrieval after approval
         _TWIN_RESULTS[self.comp_id] = result_twin
 
-        # Create ComputationResult
+        # Create ComputationResult with session reference if we have one
+        session = getattr(self, "_session", None)
         comp_result = ComputationResult(
             result=result_twin,
             stdout=stdout_str,
@@ -1126,6 +1201,7 @@ class ComputationRequest:
             comp_id=self.comp_id,
             sender=self.sender,
             context=context,
+            session=session,
         )
 
         print(f"⚙️  Executed: {self.result_name} = {self.func.__name__}(...)")
@@ -1377,7 +1453,8 @@ class ComputationRequest:
         result_twin.public_stderr = public_stderr
         result_twin.public_figures = captured_figures
 
-        # Return ComputationResult
+        # Return ComputationResult with session reference if we have one
+        session = getattr(self, "_session", None)
         return ComputationResult(
             result=result_twin,
             stdout=public_stdout,
@@ -1388,6 +1465,7 @@ class ComputationRequest:
             comp_id=self.comp_id,
             sender=self.sender,
             context=context,
+            session=session,
         )
 
     def run_both(self, context=None):
@@ -1640,7 +1718,8 @@ class ComputationRequest:
         result_twin.private_stderr = private_stderr
         result_twin.private_figures = private_figures
 
-        # Create ComputationResult
+        # Create ComputationResult with session reference if we have one
+        session = getattr(self, "_session", None)
         return ComputationResult(
             result=result_twin,
             stdout=private_stdout,
@@ -1651,6 +1730,7 @@ class ComputationRequest:
             comp_id=self.comp_id,
             sender=self.sender,
             context=context,
+            session=session,
         )
 
     def __call__(self, context=None):

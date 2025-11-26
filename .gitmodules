@@ -1,0 +1,6 @@
+[submodule "syftbox-sdk"]
+	path = syftbox-sdk
+	url = https://github.com/OpenMined/syftbox-sdk
+[submodule "syftbox"]
+	path = syftbox
+	url = https://github.com/OpenMined/syftbox.git

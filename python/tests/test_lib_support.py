@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 import pytest
 
@@ -32,18 +33,14 @@ def summarize(obj: Any) -> Dict[str, Any]:
         import torch
     except ImportError:  # pragma: no cover - guarded in runtime
         torch = None  # type: ignore[assignment]
-    try:
-        from PIL import Image
-    except ImportError:  # pragma: no cover - guarded in runtime
-        Image = None  # type: ignore[assignment]
+    with contextlib.suppress(ImportError):
+        from PIL import Image  # noqa: F401
     try:
         import matplotlib
 
         matplotlib.use("Agg")
-        import matplotlib.pyplot as plt  # type: ignore
     except Exception:  # pragma: no cover - guarded in runtime
         matplotlib = None  # type: ignore[assignment]
-        plt = None  # type: ignore[assignment]
 
     if np is not None and isinstance(obj, np.ndarray):
         summary.update(
@@ -159,6 +156,7 @@ def _run_deserializer_in_subprocess(src: str, data_path: Path) -> Dict[str, Any]
         "import json",
         "from pathlib import Path",
         "from typing import Any, Dict",
+        "import contextlib",
         "",
         "# best-effort imports so deserializer source can reference them without exploding",
         "scope: Dict[str, Any] = {}",
@@ -166,14 +164,14 @@ def _run_deserializer_in_subprocess(src: str, data_path: Path) -> Dict[str, Any]
         "scope['Any'] = Any",
         "scope['Dict'] = Dict",
         "for _stmt in [",
-        "    \"import numpy as np\",",
-        "    \"import pandas as pd\",",
-        "    \"from PIL import Image\",",
+        '    "import numpy as np",',
+        '    "import pandas as pd",',
+        '    "from PIL import Image",',
         "    \"import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt\",",
-        "    \"import torch\",",
-        "    \"from safetensors.torch import load_file, save_file\",",
-        "    \"import anndata as ad\",",
-        "    \"import json\",",
+        '    "import torch",',
+        '    "from safetensors.torch import load_file, save_file",',
+        '    "import anndata as ad",',
+        '    "import json",',
         "]:",
         "    try:",
         "        exec(_stmt, scope, scope)",
@@ -253,8 +251,8 @@ def _pandas_index_factory():
 
 
 def _pillow_image_factory():
-    Image = pytest.importorskip("PIL.Image")
-    img = Image.new("RGB", (2, 2), color=(255, 0, 0))
+    image_mod = pytest.importorskip("PIL.Image")
+    img = image_mod.new("RGB", (2, 2), color=(255, 0, 0))
     return img
 
 
@@ -314,7 +312,6 @@ def test_roundtrip_serialization(case: Dict[str, Any], tmp_path: Path) -> None:
 
 
 def test_missing_dependency_prompt(tmp_path: Path) -> None:
-    pd = pytest.importorskip("pandas")
     pytest.importorskip("pyarrow")
     df = _pandas_dataframe_factory()
     register_builtin_loader(df, TrustedLoader)

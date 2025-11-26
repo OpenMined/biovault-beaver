@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import importlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, List, Set, Type
@@ -26,9 +26,10 @@ class _LazyLoaderSpec:
 
 
 def _match_numpy(obj: Any) -> bool:
-    return getattr(obj.__class__, "__module__", "").startswith("numpy") and getattr(
-        obj.__class__, "__name__", ""
-    ) == "ndarray"
+    return (
+        getattr(obj.__class__, "__module__", "").startswith("numpy")
+        and getattr(obj.__class__, "__name__", "") == "ndarray"
+    )
 
 
 def _require(module_name: str, *, feature: str):
@@ -37,7 +38,7 @@ def _require(module_name: str, *, feature: str):
     except ImportError as exc:  # pragma: no cover - runtime enforcement
         raise ImportError(
             f"{module_name} is required for {feature}. "
-            "Install with `pip install \"biovault-beaver[lib-support]\"`."
+            'Install with `pip install "biovault-beaver[lib-support]"`.'
         ) from exc
 
 
@@ -59,7 +60,7 @@ def _register_numpy(obj: Any, trusted_loader_cls: Type[Any]) -> None:
         except ImportError as exc:  # pragma: no cover - runtime env
             raise ImportError(
                 "numpy is required to deserialize numpy arrays. "
-                "Install with `pip install \"biovault-beaver[lib-support]\"`."
+                'Install with `pip install "biovault-beaver[lib-support]"`.'
             ) from exc
         with Path(path).open("rb") as f:
             return np_local.load(f, allow_pickle=False)
@@ -104,14 +105,14 @@ def _register_pandas(obj: Any, trusted_loader_cls: Type[Any]) -> None:
         except ImportError as exc:  # pragma: no cover - runtime env
             raise ImportError(
                 "pandas is required to deserialize pandas objects. "
-                "Install with `pip install \"biovault-beaver[lib-support]\"`."
+                'Install with `pip install "biovault-beaver[lib-support]"`.'
             ) from exc
         try:
             import pyarrow  # noqa: F401  # type: ignore
         except ImportError as exc:  # pragma: no cover - runtime env
             raise ImportError(
                 "pyarrow is required to deserialize pandas parquet payloads. "
-                "Install with `pip install \"biovault-beaver[lib-support]\"`."
+                'Install with `pip install "biovault-beaver[lib-support]"`.'
             ) from exc
         from pathlib import Path as _Path
 
@@ -157,7 +158,7 @@ def _register_pillow(obj: Any, trusted_loader_cls: Type[Any]) -> None:
         except ImportError as exc:  # pragma: no cover - runtime env
             raise ImportError(
                 "Pillow is required to deserialize images. "
-                "Install with `pip install \"biovault-beaver[lib-support]\"`."
+                'Install with `pip install "biovault-beaver[lib-support]"`.'
             ) from exc
         with Image_local.open(path) as img:  # type: ignore[attr-defined]
             return img.copy()
@@ -175,14 +176,10 @@ def _register_matplotlib(obj: Any, trusted_loader_cls: Type[Any]) -> None:
 
     @trusted_loader_cls.register(obj_type, name=name)
     def matplotlib_serialize_file(fig: Any, path: Path) -> None:
-        import matplotlib
-
         fig.savefig(path, format="png", bbox_inches="tight", pad_inches=0)
 
     @trusted_loader_cls.register(obj_type, name=name)
     def matplotlib_deserialize_file(path: Path) -> Any:
-        import matplotlib
-
         import matplotlib.image as mpimg
 
         matplotlib.use("Agg")
@@ -199,23 +196,20 @@ def _register_matplotlib(obj: Any, trusted_loader_cls: Type[Any]) -> None:
 
 
 def _match_torch(obj: Any) -> bool:
-    return getattr(obj.__class__, "__module__", "").startswith("torch") and getattr(
-        obj.__class__, "__name__", ""
-    ) == "Tensor"
+    return (
+        getattr(obj.__class__, "__module__", "").startswith("torch")
+        and getattr(obj.__class__, "__name__", "") == "Tensor"
+    )
 
 
 def _register_torch(obj: Any, trusted_loader_cls: Type[Any]) -> None:
-    import torch
-    from safetensors.torch import load_file, save_file
+    from safetensors.torch import save_file
 
     obj_type = type(obj)
     name = f"{obj_type.__module__}.{obj_type.__name__}"
 
     @trusted_loader_cls.register(obj_type, name=name)
     def torch_serialize_file(tensor: Any, path: Path) -> None:
-        import torch
-        from safetensors.torch import save_file
-
         path = Path(path)
         meta_path = path.with_suffix(path.suffix + ".meta.json")
         tensor_cpu = tensor.detach().cpu()
@@ -230,14 +224,14 @@ def _register_torch(obj: Any, trusted_loader_cls: Type[Any]) -> None:
         except ImportError as exc:  # pragma: no cover - runtime env
             raise ImportError(
                 "torch is required to deserialize torch tensors. "
-                "Install with `pip install \"biovault-beaver[lib-support]\"`."
+                'Install with `pip install "biovault-beaver[lib-support]"`.'
             ) from exc
         try:
             from safetensors.torch import load_file
         except ImportError as exc:  # pragma: no cover - runtime env
             raise ImportError(
                 "safetensors is required to deserialize torch tensors. "
-                "Install with `pip install \"biovault-beaver[lib-support]\"`."
+                'Install with `pip install "biovault-beaver[lib-support]"`.'
             ) from exc
 
         path = Path(path)
@@ -260,14 +254,11 @@ def _match_anndata(obj: Any) -> bool:
 
 
 def _register_anndata(obj: Any, trusted_loader_cls: Type[Any]) -> None:
-    import anndata as ad
-
     obj_type = type(obj)
     name = f"{obj_type.__module__}.{obj_type.__name__}"
 
     @trusted_loader_cls.register(obj_type, name=name)
     def annadata_serialize_file(adata: Any, path: Path) -> None:
-        ad_local = _require("anndata", feature="AnnData serialization")
         adata.write_h5ad(path)
 
     @trusted_loader_cls.register(obj_type, name=name)
@@ -277,7 +268,7 @@ def _register_anndata(obj: Any, trusted_loader_cls: Type[Any]) -> None:
         except ImportError as exc:  # pragma: no cover - runtime env
             raise ImportError(
                 "anndata is required to deserialize AnnData objects. "
-                "Install with `pip install \"biovault-beaver[lib-support]\"`."
+                'Install with `pip install "biovault-beaver[lib-support]"`.'
             ) from exc
         return ad_local.read_h5ad(path)
 

@@ -204,6 +204,8 @@ def _run_deserializer_with_python(
         "import builtins",
         "scope: Dict[str, Any] = {}",
         "scope['Path'] = Path",
+        "scope['Any'] = Any",
+        "scope['Dict'] = Dict",
         "missing = set(json.loads(" + json.dumps(json.dumps(missing_modules or [])) + "))",
         "real_import = builtins.__import__",
         "def _fake_import(name, *args, **kwargs):",

@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd python
-          uv sync --all-extras
+          uv sync --extra dev
 
       - name: Run linting
         run: bash lint.sh
@@ -47,7 +47,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd python
-          uv sync --all-extras
+          uv sync --extra dev
 
       - name: Run tests
         run: bash test.sh

@@ -24,6 +24,12 @@ dependencies = [
     "pandas>=1.3.0",
     "pyfory",
     "numpy",
+    "pyarrow",
+    "pillow",
+    "matplotlib",
+    "safetensors",
+    "torch",
+    "anndata",
     "RestrictedPython",
 ]
 
@@ -39,6 +45,14 @@ dev = [
     "vulture>=2.11",
 ]
 format = ["pyarrow"]
+lib-support = [
+    "pillow",
+    "matplotlib",
+    "safetensors",
+    "torch",
+    "anndata",
+    "pyarrow",
+]
 
 [build-system]
 requires = ["hatchling"]

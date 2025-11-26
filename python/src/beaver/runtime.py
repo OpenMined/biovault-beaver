@@ -37,6 +37,7 @@ except ImportError:
 
     pyfory = types.SimpleNamespace(Fory=_StubFory)
 
+from . import lib_support
 from .envelope import BeaverEnvelope
 
 
@@ -373,6 +374,7 @@ def _prepare_for_sending(
     from .twin import Twin
 
     # Trusted loader conversion (non-Twin)
+    lib_support.register_builtin_loader(obj, TrustedLoader)
     tl = TrustedLoader.get(type(obj))
     if tl:
         target_dir = Path(artifact_dir) if artifact_dir else Path(tempfile.gettempdir())

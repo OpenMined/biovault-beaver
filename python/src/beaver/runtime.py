@@ -843,6 +843,9 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         if backend and backend.uses_crypto:
             # Wait for file to appear AND stabilize (sync in progress) with timeout
             import time as _time
+            spinner = None
+            spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            spin_idx = 0
 
             sync_timeout = 60.0  # seconds to wait for sync (increased for large files)
             sync_poll = 1.0  # poll interval
@@ -851,6 +854,8 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
             waited = False
             last_size = -1
             stable_since = None
+            last_print = 0.0
+            spinner_interval = 0.2
 
             while True:
                 now = _time.monotonic()
@@ -865,6 +870,10 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
                     if not waited:
                         print(f"⏳ Waiting for artifact file to sync: {file_path.name}")
                         waited = True
+                    if now - last_print >= spinner_interval:
+                        spin_idx = (spin_idx + 1) % len(spinner_chars)
+                        print(f"{spinner_chars[spin_idx]} waiting for {file_path.name}", end="\r")
+                        last_print = now
                     _time.sleep(sync_poll)
                     continue
 
@@ -878,6 +887,13 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
                             f"⏳ Waiting for artifact file to sync: {file_path.name} ({current_size:,} bytes)"
                         )
                         waited = True
+                    if now - last_print >= spinner_interval:
+                        spin_idx = (spin_idx + 1) % len(spinner_chars)
+                        print(
+                            f"{spinner_chars[spin_idx]} syncing {file_path.name} ({current_size:,} bytes)",
+                            end="\r",
+                        )
+                        last_print = now
                     _time.sleep(sync_poll)
                     continue
 
@@ -885,10 +901,19 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
                 if stable_since and (now - stable_since) >= stable_time:
                     break  # File is stable, proceed
 
+                if now - last_print >= spinner_interval:
+                    spin_idx = (spin_idx + 1) % len(spinner_chars)
+                    print(
+                        f"{spinner_chars[spin_idx]} syncing {file_path.name} ({current_size:,} bytes)",
+                        end="\r",
+                    )
+                    last_print = now
                 _time.sleep(sync_poll)
 
             if waited:
-                print(f"✓ Artifact file synced: {Path(data_path).name} ({last_size:,} bytes)")
+                print(f"\n✓ Artifact file synced: {Path(data_path).name} ({last_size:,} bytes)")
+            else:
+                print()
 
             # File exists, decrypt it
             try:

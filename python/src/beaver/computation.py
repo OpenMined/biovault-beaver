@@ -1027,9 +1027,31 @@ class ComputationRequest:
         if context is None:
             context = self._auto_detect_context()
 
+        def resolve_twin_ref(val):
+            """Convert Twin reference dicts back into local Twin instances if available."""
+            if isinstance(val, dict) and val.get("_beaver_twin_ref"):
+                from .twin import _TWIN_REGISTRY
+
+                twin_id = val["twin_id"]
+                owner_hint = val.get("owner")
+                if owner_hint and (twin_id, owner_hint) in _TWIN_REGISTRY:
+                    return _TWIN_REGISTRY[(twin_id, owner_hint)]
+                if context and (twin_id, context.user) in _TWIN_REGISTRY:
+                    return _TWIN_REGISTRY[(twin_id, context.user)]
+                for (tid, _owner), twin in _TWIN_REGISTRY.items():
+                    if tid == twin_id:
+                        return twin
+                raise ValueError(
+                    f"Twin reference '{val.get('name', 'unknown')}' (ID: {twin_id[:12]}...) not available locally"
+                )
+            return val
+
+        resolved_args = tuple(resolve_twin_ref(a) for a in self.args)
+        resolved_kwargs = {k: resolve_twin_ref(v) for k, v in self.kwargs.items()}
+
         # Replace Twin arguments with their private sides (preferring local Twin)
         private_args = []
-        for arg in self.args:
+        for arg in resolved_args:
             if isinstance(arg, Twin):
                 private_data = get_local_twin_private(arg)
                 if private_data is not None:
@@ -1040,7 +1062,7 @@ class ComputationRequest:
                 private_args.append(arg)
 
         private_kwargs = {}
-        for key, val in self.kwargs.items():
+        for key, val in resolved_kwargs.items():
             if isinstance(val, Twin):
                 private_data = get_local_twin_private(val)
                 if private_data is not None:
@@ -1280,9 +1302,34 @@ class ComputationRequest:
         if context is None:
             context = self._auto_detect_context()
 
+        def resolve_twin_ref(val):
+            """Convert Twin reference dicts back into local Twin instances if available."""
+            if isinstance(val, dict) and val.get("_beaver_twin_ref"):
+                from .twin import _TWIN_REGISTRY
+
+                twin_id = val["twin_id"]
+                owner_hint = val.get("owner")
+                # Try owner hint
+                if owner_hint and (twin_id, owner_hint) in _TWIN_REGISTRY:
+                    return _TWIN_REGISTRY[(twin_id, owner_hint)]
+                # Try context user
+                if context and (twin_id, context.user) in _TWIN_REGISTRY:
+                    return _TWIN_REGISTRY[(twin_id, context.user)]
+                # Fallback: any twin with matching id
+                for (tid, _owner), twin in _TWIN_REGISTRY.items():
+                    if tid == twin_id:
+                        return twin
+                raise ValueError(
+                    f"Twin reference '{val.get('name', 'unknown')}' (ID: {twin_id[:12]}...) not available locally"
+                )
+            return val
+
+        resolved_args = tuple(resolve_twin_ref(a) for a in self.args)
+        resolved_kwargs = {k: resolve_twin_ref(v) for k, v in self.kwargs.items()}
+
         # Replace Twin arguments with their public sides (preferring local Twin)
         mock_args = []
-        for arg in self.args:
+        for arg in resolved_args:
             if isinstance(arg, Twin):
                 public_data = get_local_twin_public(arg)
                 if public_data is not None:
@@ -1293,7 +1340,7 @@ class ComputationRequest:
                 mock_args.append(arg)
 
         mock_kwargs = {}
-        for k, v in self.kwargs.items():
+        for k, v in resolved_kwargs.items():
             if isinstance(v, Twin):
                 public_data = get_local_twin_public(v)
                 if public_data is not None:

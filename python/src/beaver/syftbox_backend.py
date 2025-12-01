@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
@@ -16,14 +17,14 @@ import beaver
 
 if TYPE_CHECKING:
     from .envelope import BeaverEnvelope
-    from .session import Session, SessionRequest
+    from .session import SessionRequest
 
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _serialize_envelope(envelope: "BeaverEnvelope") -> bytes:
+def _serialize_envelope(envelope: BeaverEnvelope) -> bytes:
     """Serialize a BeaverEnvelope to bytes (JSON format)."""
     record = {
         "version": envelope.version,
@@ -41,7 +42,7 @@ def _serialize_envelope(envelope: "BeaverEnvelope") -> bytes:
     return json.dumps(record, indent=2).encode("utf-8")
 
 
-def _deserialize_envelope(data: bytes) -> "BeaverEnvelope":
+def _deserialize_envelope(data: bytes) -> BeaverEnvelope:
     """Deserialize bytes to a BeaverEnvelope."""
     from .envelope import BeaverEnvelope
 
@@ -89,8 +90,7 @@ class SyftBoxBackend:
             import syftbox_sdk as syft
         except ImportError as e:
             raise ImportError(
-                "syftbox-sdk is required for SyftBox backend. "
-                "Install with: pip install syftbox-sdk"
+                "syftbox-sdk is required for SyftBox backend. Install with: pip install syftbox-sdk"
             ) from e
 
         self._syft = syft
@@ -145,7 +145,7 @@ class SyftBoxBackend:
 
     def write_envelope(
         self,
-        envelope: "BeaverEnvelope",
+        envelope: BeaverEnvelope,
         recipients: List[str],
         filename: Optional[str] = None,
     ) -> Path:
@@ -185,7 +185,7 @@ class SyftBoxBackend:
 
         return datasite_path
 
-    def read_envelope(self, path: Path | str) -> "BeaverEnvelope":
+    def read_envelope(self, path: Path | str) -> BeaverEnvelope:
         """
         Read and decrypt envelope from any datasite.
 
@@ -327,26 +327,39 @@ class SyftBoxBackend:
     def get_rpc_session_path(self) -> Path:
         """Get path to session RPC folder."""
         return (
-            self.data_dir
-            / "datasites"
-            / self.email
-            / "app_data"
-            / "biovault"
-            / "rpc"
-            / "session"
+            self.data_dir / "datasites" / self.email / "app_data" / "biovault" / "rpc" / "session"
         )
 
     def get_peer_rpc_session_path(self, peer_email: str) -> Path:
         """Get path to peer's session RPC folder."""
         return (
-            self.data_dir
-            / "datasites"
-            / peer_email
-            / "app_data"
-            / "biovault"
-            / "rpc"
-            / "session"
+            self.data_dir / "datasites" / peer_email / "app_data" / "biovault" / "rpc" / "session"
         )
+
+    def _wait_for_peer_rpc_acl(
+        self, peer_email: str, timeout: int = 30, poll_interval: float = 1.0
+    ) -> bool:
+        """
+        Wait until the peer's RPC ACL (syft.pub.yaml) is visible before we try to write.
+        This avoids issuing writes that the relay will reject because the ACL has not synced yet.
+        """
+        rpc_dir = self.get_peer_rpc_session_path(peer_email).parent
+        # Look for either the rpc-level ACL or the app-level ACL
+        candidates = [
+            rpc_dir / "syft.pub.yaml",
+            rpc_dir.parent / "syft.pub.yaml",
+        ]
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for path in candidates:
+                try:
+                    if path.exists():
+                        return True
+                except OSError:
+                    # Keep trying until timeout if the path is temporarily inaccessible
+                    pass
+            time.sleep(poll_interval)
+        return False
 
     def send_session_request(
         self,
@@ -368,6 +381,11 @@ class SyftBoxBackend:
         # Write request to peer's RPC folder
         peer_rpc = self.get_peer_rpc_session_path(target_email)
         peer_rpc.mkdir(parents=True, exist_ok=True)
+
+        if not self._wait_for_peer_rpc_acl(target_email):
+            raise TimeoutError(
+                f"Peer RPC ACL not found for {target_email}; aborting session request to avoid rejection"
+            )
 
         request_data = {
             "session_id": session_id,
@@ -395,7 +413,7 @@ class SyftBoxBackend:
 
         return request_file
 
-    def list_session_requests(self) -> List["SessionRequest"]:
+    def list_session_requests(self) -> List[SessionRequest]:
         """
         List pending session requests in our RPC folder.
 
@@ -447,6 +465,11 @@ class SyftBoxBackend:
         # Write response to requester's RPC folder
         requester_rpc = self.get_peer_rpc_session_path(requester_email)
         requester_rpc.mkdir(parents=True, exist_ok=True)
+
+        if not self._wait_for_peer_rpc_acl(requester_email):
+            raise TimeoutError(
+                f"Peer RPC ACL not found for {requester_email}; aborting session response to avoid rejection"
+            )
 
         response_data = {
             "session_id": session_id,
@@ -515,34 +538,24 @@ class SyftBoxBackend:
         Returns:
             Path to the created session folder
         """
-        session_path = (
-            self.data_dir
-            / "datasites"
-            / self.email
-            / "shared"
-            / "biovault"
-            / "sessions"
-            / session_id
+        # Use syftbox-sdk to grant peer access under the session path (owner write/read/admin)
+        relative = Path("shared").joinpath("biovault").joinpath("sessions").joinpath(session_id)
+        owner_path = Path(
+            self.app.ensure_peer_can_read(str(relative), peer_email, allow_write=True)
         )
-        session_path.mkdir(parents=True, exist_ok=True)
 
-        # Create data subfolder
-        (session_path / "data").mkdir(exist_ok=True)
+        # Ensure a data subfolder exists
+        (owner_path / "data").mkdir(parents=True, exist_ok=True)
 
-        # Create permission file
-        permission_content = f"""# Session permission file
-# Session ID: {session_id}
-# Created: {_iso_now()}
+        # Also ensure peer side exists with matching ACL
+        peer_path = (
+            Path(self.data_dir).joinpath("datasites").joinpath(peer_email).joinpath(relative)
+        )
+        peer_path.mkdir(parents=True, exist_ok=True)
+        (peer_path / "data").mkdir(parents=True, exist_ok=True)
+        self.app.ensure_peer_can_read(str(relative), peer_email, allow_write=True)
 
-read:
-  - {peer_email}
-
-write:
-  - {self.email}
-"""
-        (session_path / "syft.pub.yaml").write_text(permission_content)
-
-        return session_path
+        return owner_path
 
     def get_session_path(self, session_id: str) -> Path:
         """Get path to our session folder."""
@@ -637,8 +650,7 @@ def import_peer_bundle(
         import syftbox_sdk as syft
     except ImportError as e:
         raise ImportError(
-            "syftbox-sdk is required for bundle import. "
-            "Install with: pip install syftbox-sdk"
+            "syftbox-sdk is required for bundle import. Install with: pip install syftbox-sdk"
         ) from e
 
     return syft.import_bundle(

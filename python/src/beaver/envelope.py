@@ -71,9 +71,8 @@ class BeaverEnvelope:
         from .runtime import _check_overwrite, _inject, unpack
 
         # Auto-detect backend from context if not provided
-        if backend is None and context is not None:
-            if hasattr(context, "_backend") and context._backend:
-                backend = context._backend
+        if backend is None and context is not None and hasattr(context, "_backend") and context._backend:
+            backend = context._backend
 
         obj = unpack(self, strict=strict, policy=policy, auto_accept=auto_accept, backend=backend)
 

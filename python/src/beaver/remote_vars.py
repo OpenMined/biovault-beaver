@@ -332,8 +332,9 @@ class RemoteVarRegistry:
             if self._context and hasattr(self._context, "_backend") and self._context._backend:
                 backend = self._context._backend
                 if backend.uses_crypto:
-                    import json
                     import base64
+                    import json
+
                     record = {
                         "version": env.version,
                         "envelope_id": env.envelope_id,
@@ -480,8 +481,9 @@ class RemoteVarRegistry:
 
         # Write envelope (encrypted if backend available)
         if backend and backend.uses_crypto and recipients:
-            import json
             import base64
+            import json
+
             record = {
                 "version": env.version,
                 "envelope_id": env.envelope_id,
@@ -871,9 +873,11 @@ class RemoteVarPointer:
                             if backend.uses_crypto:
                                 # Read and decrypt using shadow pattern
                                 raw = bytes(backend.storage.read_with_shadow(str(data_path)))
-                                import json
                                 import base64
+                                import json
+
                                 from .envelope import BeaverEnvelope
+
                                 record = json.loads(raw.decode("utf-8"))
                                 payload = base64.b64decode(record["payload_b64"])
                                 env = BeaverEnvelope(

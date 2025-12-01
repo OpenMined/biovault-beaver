@@ -13,7 +13,7 @@ import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional, Tuple
 from uuid import uuid4
 
 try:
@@ -38,6 +38,9 @@ except ImportError:
     pyfory = types.SimpleNamespace(Fory=_StubFory)
 
 from .envelope import BeaverEnvelope
+
+if TYPE_CHECKING:
+    from .session import Session
 
 
 class TrustedLoader:
@@ -455,7 +458,9 @@ def _prepare_for_sending(
                 target_dir.mkdir(parents=True, exist_ok=True)
                 base = name_hint or getattr(private_obj, "name", None) or "artifact"
                 path = target_dir / f"{base}_private.bin"
-                _write_artifact_encrypted(tl_priv["serializer"], private_obj, path, backend, recipients)
+                _write_artifact_encrypted(
+                    tl_priv["serializer"], private_obj, path, backend, recipients
+                )
                 import inspect
 
                 src_lines = inspect.getsource(tl_priv["deserializer"]).splitlines()
@@ -740,6 +745,7 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
     if isinstance(obj, dict) and obj.get("_beaver_dataframe"):
         try:
             import pandas as pd
+
             return pd.DataFrame(obj["data"])
         except ImportError:
             # pandas not available, return the raw data
@@ -749,6 +755,7 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
     if isinstance(obj, dict) and obj.get("_beaver_series"):
         try:
             import pandas as pd
+
             return pd.Series(obj["data"], name=obj.get("name"))
         except ImportError:
             # pandas not available, return the raw data
@@ -764,14 +771,15 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         # ALWAYS translate when backend is available - file is synced to our local view
         if data_path and backend:
             import re
+
             # Match paths like .../datasites/<email>/shared/...
-            match = re.search(r'/datasites/([^/]+)/(shared|app_data|public)/', data_path)
+            match = re.search(r"/datasites/([^/]+)/(shared|app_data|public)/", data_path)
             if match:
                 datasite_identity = match.group(1)
                 # Get path after the datasite identity
-                idx = data_path.find(f'/datasites/{datasite_identity}/')
+                idx = data_path.find(f"/datasites/{datasite_identity}/")
                 if idx >= 0:
-                    relative_path = data_path[idx + len(f'/datasites/'):]
+                    relative_path = data_path[idx + len("/datasites/") :]
                     # Translate to our local datasites folder
                     translated = str(backend.data_dir / "datasites" / relative_path)
                     # Always use translated path - file should be synced to our local view
@@ -833,26 +841,54 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         actual_path = data_path
         temp_file = None
         if backend and backend.uses_crypto:
-            # Wait for file to appear (sync in progress) with timeout
+            # Wait for file to appear AND stabilize (sync in progress) with timeout
             import time as _time
-            sync_timeout = 30.0  # seconds to wait for sync
+
+            sync_timeout = 60.0  # seconds to wait for sync (increased for large files)
             sync_poll = 1.0  # poll interval
+            stable_time = 2.0  # file size must be stable for this long
             sync_deadline = _time.monotonic() + sync_timeout
             waited = False
+            last_size = -1
+            stable_since = None
 
-            while not Path(data_path).exists():
-                if _time.monotonic() >= sync_deadline:
+            while True:
+                now = _time.monotonic()
+                if now >= sync_deadline:
                     raise RuntimeError(
-                        f"Artifact file not found at {data_path} after waiting {sync_timeout}s. "
+                        f"Artifact file not synced at {data_path} after waiting {sync_timeout}s. "
                         f"File may still be syncing - try again later."
                     )
-                if not waited:
-                    print(f"⏳ Waiting for artifact file to sync: {Path(data_path).name}")
-                    waited = True
+
+                file_path = Path(data_path)
+                if not file_path.exists():
+                    if not waited:
+                        print(f"⏳ Waiting for artifact file to sync: {file_path.name}")
+                        waited = True
+                    _time.sleep(sync_poll)
+                    continue
+
+                # File exists - check if size has stabilized
+                current_size = file_path.stat().st_size
+                if current_size != last_size:
+                    last_size = current_size
+                    stable_since = now
+                    if not waited:
+                        print(
+                            f"⏳ Waiting for artifact file to sync: {file_path.name} ({current_size:,} bytes)"
+                        )
+                        waited = True
+                    _time.sleep(sync_poll)
+                    continue
+
+                # Size is same - check if stable long enough
+                if stable_since and (now - stable_since) >= stable_time:
+                    break  # File is stable, proceed
+
                 _time.sleep(sync_poll)
 
             if waited:
-                print(f"✓ Artifact file synced: {Path(data_path).name}")
+                print(f"✓ Artifact file synced: {Path(data_path).name} ({last_size:,} bytes)")
 
             # File exists, decrypt it
             try:
@@ -863,6 +899,7 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
             except Exception as e:
                 # Log the error but still try to decrypt - the file is encrypted
                 import beaver
+
                 if beaver.debug:
                     print(f"[DEBUG] Failed to decrypt {data_path}: {e}")
                 # Don't fall back to direct read for encrypted files
@@ -878,9 +915,14 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
     if isinstance(obj, list):
         return [_resolve_trusted_loader(x, auto_accept=auto_accept, backend=backend) for x in obj]
     if isinstance(obj, tuple):
-        return tuple(_resolve_trusted_loader(x, auto_accept=auto_accept, backend=backend) for x in obj)
+        return tuple(
+            _resolve_trusted_loader(x, auto_accept=auto_accept, backend=backend) for x in obj
+        )
     if isinstance(obj, dict):
-        return {k: _resolve_trusted_loader(v, auto_accept=auto_accept, backend=backend) for k, v in obj.items()}
+        return {
+            k: _resolve_trusted_loader(v, auto_accept=auto_accept, backend=backend)
+            for k, v in obj.items()
+        }
     return obj
 
 
@@ -1039,22 +1081,36 @@ def load_by_id(
     return env, obj
 
 
-def list_inbox(inbox: Path | str) -> list[BeaverEnvelope]:
-    """List and load all .beaver envelopes in an inbox."""
+def list_inbox(inbox: Path | str, *, backend=None) -> list[BeaverEnvelope]:
+    """List and load all .beaver envelopes in an inbox.
+
+    Args:
+        inbox: Path to inbox directory
+        backend: Optional SyftBoxBackend for decrypting encrypted files
+
+    Returns:
+        List of BeaverEnvelope objects
+    """
     inbox_path = Path(inbox)
     envelopes = []
     for p in sorted(inbox_path.glob("*.beaver")):
-        with contextlib.suppress(Exception):
-            envelopes.append(read_envelope(p))
+        try:
+            if backend is not None and backend.uses_crypto:
+                # Use backend to decrypt encrypted files
+                env = backend.read_envelope(p)
+            else:
+                env = read_envelope(p)
+            envelopes.append(env)
+        except Exception:
+            # Skip files that can't be read (may be partially synced or corrupt)
+            pass
     return envelopes
 
 
 class InboxView:
     """Wrapper to pretty-print an inbox as a table in notebooks."""
 
-    def __init__(
-        self, inbox: Path | str, envelopes: list[BeaverEnvelope], session=None
-    ) -> None:
+    def __init__(self, inbox: Path | str, envelopes: list[BeaverEnvelope], session=None) -> None:
         self.inbox = Path(inbox)
         self.envelopes = envelopes
         self.session = session  # Session reference for session-scoped inboxes
@@ -1573,13 +1629,28 @@ def export(
                             matplotlib.use(original_backend, force=True)
 
                 # Create ComputationRequest for private execution
+                # Convert Twins to references (pointer dicts) to avoid serializing full data
+                def twin_to_ref(val):
+                    """Convert Twin to pointer reference for serialization."""
+                    if isinstance(val, Twin):
+                        return {
+                            "_beaver_twin_ref": True,
+                            "twin_id": val.twin_id,
+                            "owner": val.owner,
+                            "name": val.name,
+                        }
+                    return val
+
+                ref_args = tuple(twin_to_ref(arg) for arg in args)
+                ref_kwargs = {k: twin_to_ref(v) for k, v in kwargs.items()}
+
                 comp_id = uuid4().hex
                 comp_request = ComputationRequest(
                     comp_id=comp_id,
                     result_id=uuid4().hex,
                     func=func,
-                    args=args,
-                    kwargs=kwargs,
+                    args=ref_args,  # Use references, not full objects
+                    kwargs=ref_kwargs,
                     sender=context.user if context else "unknown",
                     result_name=name or f"{func.__name__}_result",
                 )
@@ -1590,6 +1661,23 @@ def export(
                 if public_value is None:
                     public_value = {"_none_result": True, "has_figures": len(captured_figures) > 0}
 
+                # Find session from input Twins (if any)
+                input_session = None
+                for arg in args:
+                    if isinstance(arg, Twin) and hasattr(arg, "_session") and arg._session is not None:
+                        input_session = arg._session
+                        break
+                for val in kwargs.values():
+                    if input_session:
+                        break
+                    if isinstance(val, Twin) and hasattr(val, "_session") and val._session is not None:
+                        input_session = val._session
+                        break
+
+                # Attach session to ComputationRequest so it's available when executed
+                if input_session is not None:
+                    comp_request._session = input_session
+
                 # Return Twin with public result and computation request
                 result_twin = Twin(
                     public=public_value,
@@ -1597,6 +1685,10 @@ def export(
                     owner=destination_user or "unknown",
                     name=name or f"{func.__name__}_result",
                 )
+
+                # Inherit session from input Twins so request_private() uses session folder
+                if input_session is not None:
+                    result_twin._session = input_session
 
                 # Attach captured outputs to the Twin
                 result_twin.public_stdout = public_stdout
@@ -1765,6 +1857,7 @@ class BeaverContext:
         self.biovault = biovault
         self.strict = strict
         self.policy = policy
+        self._active_session = None  # Track the most recently created/accepted session
 
         # SyftBox backend (None for legacy filesystem mode)
         self._backend = _backend
@@ -1797,7 +1890,6 @@ class BeaverContext:
         self._stop_auto_load = False
         self._processed_replies = set()  # Track processed envelope IDs
 
-        # Start auto-loading if enabled
         if auto_load_replies:
             self.start_auto_load()
 
@@ -1973,14 +2065,15 @@ class BeaverContext:
             status="pending",
         )
         session._context = self
+        self._active_session = session
 
         print(f"📤 Session request sent to {peer_email}")
         print(f"   Session ID: {session_id}")
-        print(f"   Use session.wait_for_acceptance() to wait for approval")
+        print("   Use session.wait_for_acceptance() to wait for approval")
 
         return session
 
-    def accept_session(self, request_or_id) -> "Session":
+    def accept_session(self, request_or_id) -> Session:
         """
         Accept a session request.
 
@@ -2048,6 +2141,7 @@ class BeaverContext:
         )
         session._context = self
         session._setup_paths()
+        self._active_session = session
 
         print(f"✅ Session accepted: {request.session_id}")
         print(f"   Peer: {request.requester}")
@@ -2109,7 +2203,7 @@ class BeaverContext:
     def _check_and_load_replies(self):
         """Check inbox for new replies and auto-load them."""
         # Get all envelopes
-        envelopes = list_inbox(self.inbox_path)
+        envelopes = list_inbox(self.inbox_path, backend=self._backend)
 
         # Find replies we haven't processed yet
         for envelope in envelopes:
@@ -2293,6 +2387,7 @@ class BeaverContext:
         filter_sender: Optional[str] = None,
         filter_name: Optional[str] = None,
         auto_load: bool = True,
+        include_session: bool = True,
     ):
         """
         Wait for a new message to arrive in the inbox.
@@ -2303,6 +2398,7 @@ class BeaverContext:
             filter_sender: Only wait for messages from this sender
             filter_name: Only wait for messages with this name
             auto_load: If True, automatically load and return the object
+            include_session: Also watch the active session folder (if any)
 
         Returns:
             If auto_load: (envelope, loaded_object)
@@ -2319,29 +2415,36 @@ class BeaverContext:
             env, obj = bv.wait_for_message(timeout=120)
         """
         # Get current envelope IDs to detect new ones
-        current_ids = {env.envelope_id for env in list_inbox(self.inbox_path)}
+        candidate_inboxes = self._candidate_inboxes(include_session=include_session)
+
+        current_ids = set()
+        for inbox_path in candidate_inboxes:
+            current_ids.update(
+                env.envelope_id for env in list_inbox(inbox_path, backend=self._backend)
+            )
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             # Check for new envelopes
-            for env in list_inbox(self.inbox_path):
-                if env.envelope_id in current_ids:
-                    continue  # Not new
+            for inbox_path in candidate_inboxes:
+                for env in list_inbox(inbox_path, backend=self._backend):
+                    if env.envelope_id in current_ids:
+                        continue  # Not new
 
-                # Apply filters
-                if filter_sender and env.sender != filter_sender:
-                    continue
-                if filter_name and env.name != filter_name:
-                    continue
+                    # Apply filters
+                    if filter_sender and env.sender != filter_sender:
+                        continue
+                    if filter_name and env.name != filter_name:
+                        continue
 
-                # Found a new matching envelope!
-                print(f"📬 New message: {env.name or env.envelope_id[:12]}")
-                print(f"   From: {env.sender}")
+                    # Found a new matching envelope!
+                    print(f"📬 New message: {env.name or env.envelope_id[:12]}")
+                    print(f"   From: {env.sender}")
 
-                if auto_load:
-                    obj = unpack(env, strict=self.strict, policy=self.policy)
-                    return env, obj
-                return env
+                    if auto_load:
+                        obj = unpack(env, strict=self.strict, policy=self.policy)
+                        return env, obj
+                    return env
 
             time.sleep(poll_interval)
 
@@ -2370,7 +2473,14 @@ class BeaverContext:
 
     def list_inbox(self, **kwargs):
         """List envelopes in the context inbox."""
-        return list_inbox(kwargs.get("inbox", self.inbox_path))
+        include_session = kwargs.pop("include_session", False)
+        inbox_path = kwargs.get("inbox", self.inbox_path)
+        envelopes = []
+        for candidate in self._candidate_inboxes(
+            include_session=include_session, base_path=inbox_path
+        ):
+            envelopes.extend(list_inbox(candidate, backend=self._backend))
+        return envelopes
 
     def inbox(
         self,
@@ -2382,6 +2492,7 @@ class BeaverContext:
         by_sender: bool = False,
         by_size: bool = False,
         by_type: bool = False,
+        include_session: bool = True,
         **kwargs,
     ):
         """
@@ -2396,12 +2507,17 @@ class BeaverContext:
             by_sender: Sort by sender alphabetically
             by_size: Sort by size (largest first)
             by_type: Sort by type alphabetically
+            include_session: Include envelopes from the active session folder (if any)
 
         Returns:
             InboxView with sorted envelopes
         """
         inbox_path = kwargs.get("inbox", self.inbox_path)
-        envelopes = list_inbox(inbox_path)
+        envelopes = []
+        for candidate in self._candidate_inboxes(
+            include_session=include_session, base_path=inbox_path
+        ):
+            envelopes.extend(list_inbox(candidate, backend=self._backend))
 
         # Apply flag shortcuts
         if newest:
@@ -2442,6 +2558,33 @@ class BeaverContext:
             envelopes = sorted(envelopes, key=sort_key, reverse=reverse)
 
         return InboxView(inbox_path, envelopes)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _candidate_inboxes(self, *, include_session: bool, base_path: Optional[Path] = None):
+        """
+        Build a list of inbox paths to watch. By default, this is the base inbox
+        plus the active session's peer folder (where requests/results land).
+        """
+        paths = []
+        base = base_path or self.inbox_path
+        paths.append(base)
+
+        if include_session and self._active_session and self._active_session.is_active:
+            if self._active_session.peer_folder is None:
+                self._active_session._setup_paths()
+            if self._active_session.peer_folder:
+                paths.append(self._active_session.peer_folder)
+
+        # Deduplicate while preserving order
+        unique = []
+        seen = set()
+        for p in paths:
+            if p not in seen:
+                unique.append(p)
+                seen.add(p)
+        return unique
 
     def save(self, path: Path | str, **kwargs) -> Path:
         """Save a namespace (default globals) using context defaults."""
@@ -2533,6 +2676,10 @@ def connect(
         # Legacy filesystem mode
         bv = beaver.connect("shared", user="bob", syftbox=False)
     """
+    # Auto-fallback to legacy mode if caller passed a folder but no data_dir
+    if syftbox and data_dir is None and folder is not None:
+        syftbox = False
+
     if syftbox:
         # SyftBox encrypted mode
         if data_dir is None:
@@ -2544,6 +2691,7 @@ def connect(
             config_path = Path(data_dir) / ".syftbox" / "config.json"
             if config_path.exists():
                 import json
+
                 try:
                     config = json.loads(config_path.read_text())
                     effective_user = config.get("email", user)

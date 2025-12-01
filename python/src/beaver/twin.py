@@ -496,16 +496,51 @@ class Twin(LiveMixin, RemoteData):
                 name=default_request_name,
             )
 
+            # Helper to convert envelope to bytes for encrypted writes
+            def env_to_bytes(envelope):
+                import json
+
+                from .runtime import _envelope_record
+
+                return json.dumps(_envelope_record(envelope), indent=2).encode("utf-8")
+
             # Determine destination: use session folder if available, otherwise fall back
+            backend = getattr(context, "_backend", None)
+
             if hasattr(self, "_session") and self._session is not None:
                 # Write to our session folder (peer can read it via sync)
                 dest_dir = self._session.local_folder
                 print(f"📤 Writing to session folder: {dest_dir}")
+                # Use backend's write_envelope for encryption if available
+                if backend and backend.uses_crypto:
+                    dest_path = dest_dir / env.filename()
+                    backend.storage.write_with_shadow(
+                        absolute_path=str(dest_path),
+                        data=env_to_bytes(env),
+                        recipients=[self.owner],
+                        hint="computation-request",
+                        overwrite=True,
+                    )
+                    path = dest_path
+                else:
+                    path = write_envelope(env, out_dir=dest_dir)
             else:
                 # Fallback: send to owner's shared folder (legacy path)
                 dest_dir = Path(context.outbox).parent / self.owner
-
-            path = write_envelope(env, out_dir=dest_dir)
+                # Use backend for encryption if available
+                if backend and backend.uses_crypto:
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    dest_path = dest_dir / env.filename()
+                    backend.storage.write_with_shadow(
+                        absolute_path=str(dest_path),
+                        data=env_to_bytes(env),
+                        recipients=[self.owner],
+                        hint="computation-request",
+                        overwrite=True,
+                    )
+                    path = dest_path
+                else:
+                    path = write_envelope(env, out_dir=dest_dir)
 
             print(f"✓ Sent to {path}")
             print(f"💡 Result will auto-update when {self.owner} approves")

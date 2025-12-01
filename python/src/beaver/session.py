@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, List, Optional
 from uuid import uuid4
 
 if TYPE_CHECKING:
@@ -105,9 +105,9 @@ class SessionRequest:
     status: str = "pending"  # pending, accepted, rejected
 
     # Internal reference to context for .accept() method
-    _context: Optional["BeaverContext"] = field(default=None, repr=False)
+    _context: Optional[BeaverContext] = field(default=None, repr=False)
 
-    def accept(self) -> "Session":
+    def accept(self) -> Session:
         """
         Accept this session request.
 
@@ -117,7 +117,9 @@ class SessionRequest:
             Session object for the accepted session
         """
         if self._context is None:
-            raise RuntimeError("SessionRequest not bound to a context. Use bv.accept_session() instead.")
+            raise RuntimeError(
+                "SessionRequest not bound to a context. Use bv.accept_session() instead."
+            )
 
         return self._context.accept_session(self)
 
@@ -145,7 +147,7 @@ class SessionRequest:
         }
 
     @classmethod
-    def from_dict(cls, data: dict, context: Optional["BeaverContext"] = None) -> "SessionRequest":
+    def from_dict(cls, data: dict, context: Optional[BeaverContext] = None) -> SessionRequest:
         """Create from dict."""
         req = cls(
             session_id=data["session_id"],
@@ -201,7 +203,7 @@ class Session:
     status: str = "pending"  # pending, active, closed
 
     # Internal references
-    _context: Optional["BeaverContext"] = field(default=None, repr=False)
+    _context: Optional[BeaverContext] = field(default=None, repr=False)
     _local_path: Optional[Path] = field(default=None, repr=False)
     _peer_path: Optional[Path] = field(default=None, repr=False)
 
@@ -252,7 +254,7 @@ class Session:
 
             time.sleep(poll_interval)
 
-        print(f"⏰ Timeout waiting for session acceptance")
+        print("⏰ Timeout waiting for session acceptance")
         return False
 
     def _check_acceptance(self) -> bool:
@@ -292,7 +294,7 @@ class Session:
                 elif data.get("status") == "rejected":
                     self.status = "rejected"
                     return False
-            except Exception as e:
+            except Exception:
                 # Could be decryption error, file not fully synced, etc.
                 pass
 
@@ -329,6 +331,11 @@ class Session:
 
         # Create our local folder
         self._local_path.mkdir(parents=True, exist_ok=True)
+        # Ensure peer session folder exists locally so downloads have a target
+        self._peer_path.mkdir(parents=True, exist_ok=True)
+        # Ensure data subdirectories exist on both sides to avoid sync rename errors
+        (self._local_path / "data").mkdir(parents=True, exist_ok=True)
+        (self._peer_path / "data").mkdir(parents=True, exist_ok=True)
 
         # Create permission file (syft.pub.yaml)
         self._write_permission_file()
@@ -460,8 +467,11 @@ rules:
         if self._peer_path is None:
             self._setup_paths()
 
+        # Get backend for decryption if available
+        backend = getattr(self._context, "_backend", None)
+
         # Look for .beaver files in peer's session folder
-        envelopes = list_inbox(self._peer_path)
+        envelopes = list_inbox(self._peer_path, backend=backend)
         return InboxView(self._peer_path, envelopes, session=self)
 
     def send(self, obj, **kwargs):
@@ -511,8 +521,9 @@ rules:
 
         # Write envelope (encrypted if backend available)
         if backend and backend.uses_crypto and recipients:
-            import json
             import base64
+            import json
+
             record = {
                 "version": env.version,
                 "envelope_id": env.envelope_id,
@@ -557,10 +568,13 @@ rules:
 
         from .runtime import list_inbox
 
+        # Get backend for decryption if available
+        backend = getattr(self._context, "_backend", None)
+
         # Get our published data
-        our_files = list_inbox(self._local_path)
+        our_files = list_inbox(self._local_path, backend=backend)
         # Get peer's published data
-        peer_files = list_inbox(self._peer_path)
+        peer_files = list_inbox(self._peer_path, backend=backend)
 
         return SessionWorkspace(
             session=self,
@@ -581,7 +595,7 @@ rules:
         }
 
     @classmethod
-    def from_dict(cls, data: dict, context: Optional["BeaverContext"] = None) -> "Session":
+    def from_dict(cls, data: dict, context: Optional[BeaverContext] = None) -> Session:
         """Create from dict."""
         session = cls(
             session_id=data["session_id"],
@@ -652,10 +666,10 @@ class SessionRequestsView:
 
         lines = [f"SessionRequests ({len(self.requests)} pending):"]
         for i, req in enumerate(self.requests):
-            status_icon = {"pending": "⏳", "accepted": "✅", "rejected": "❌"}.get(req.status, "❓")
-            lines.append(
-                f"  [{i}] {status_icon} {req.session_id[:8]}... from {req.requester}"
+            status_icon = {"pending": "⏳", "accepted": "✅", "rejected": "❌"}.get(
+                req.status, "❓"
             )
+            lines.append(f"  [{i}] {status_icon} {req.session_id[:8]}... from {req.requester}")
         lines.append("")
         lines.append("Use [index] or [session_id] to select, then .accept() to approve")
         return "\n".join(lines)
@@ -666,7 +680,9 @@ class SessionRequestsView:
 
         rows = []
         for i, req in enumerate(self.requests):
-            status_icon = {"pending": "⏳", "accepted": "✅", "rejected": "❌"}.get(req.status, "❓")
+            status_icon = {"pending": "⏳", "accepted": "✅", "rejected": "❌"}.get(
+                req.status, "❓"
+            )
             rows.append(
                 f"<tr>"
                 f"<td>[{i}]</td>"

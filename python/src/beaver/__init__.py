@@ -1,19 +1,5 @@
 """Lightweight notebook-to-notebook ferry for Python objects using Fory."""
 
-# Debug flag for beaver output
-# Also controls SyftBox SDK debug output when using SyftBoxBackend
-debug = False
-
-# Enable matplotlib inline mode by default in Jupyter/IPython
-try:
-    from IPython import get_ipython
-
-    ip = get_ipython()
-    if ip is not None:
-        ip.run_line_magic("matplotlib", "inline")
-except (ImportError, AttributeError):
-    pass
-
 from .computation import (
     ComputationRequest,
     ComputationResult,
@@ -29,7 +15,6 @@ from .policy import (
     BeaverPolicy,
 )
 from .remote_vars import RemoteVar, RemoteVarRegistry, RemoteVarView
-from .session import Session, SessionRequest, SessionRequestsView
 from .runtime import (
     BeaverContext,
     InboxView,
@@ -50,8 +35,23 @@ from .runtime import (
     wait_for_reply,
     write_envelope,
 )
+from .session import Session, SessionRequest, SessionRequestsView
 from .twin import CapturedFigure, Twin
 from .twin_result import TwinComputationResult
+
+# Debug flag for beaver output
+# Also controls SyftBox SDK debug output when using SyftBoxBackend
+debug = False
+
+# Enable matplotlib inline mode by default in Jupyter/IPython
+try:
+    from IPython import get_ipython
+
+    ip = get_ipython()
+    if ip is not None:
+        ip.run_line_magic("matplotlib", "inline")
+except (ImportError, AttributeError):
+    pass
 
 # SyftBox integration (optional - requires syftbox-sdk)
 try:

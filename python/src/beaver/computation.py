@@ -701,6 +701,9 @@ class ComputationResult:
                     # Encrypt for the sender who requested the computation
                     recipients = [self.sender]
 
+            # Preserve private side when wrapping in Twin so it survives serialization
+            preserve_private = isinstance(result_twin, Twin) and result_twin.has_private
+
             env = pack(
                 result_twin,
                 sender=self.context.user,
@@ -709,12 +712,14 @@ class ComputationResult:
                 artifact_dir=dest_dir,
                 backend=backend,
                 recipients=recipients,
+                preserve_private=preserve_private,
             )
 
             # Write envelope (encrypted if backend available)
             if backend and backend.uses_crypto and recipients:
-                import json
                 import base64
+                import json
+
                 record = {
                     "version": env.version,
                     "envelope_id": env.envelope_id,
@@ -1008,6 +1013,11 @@ class ComputationRequest:
                         if local_twin.has_private:
                             return unwrap_for_computation(local_twin.private)
 
+                # Fallback: any Twin with matching id
+                for (tid, _owner), local_twin in _TWIN_REGISTRY.items():
+                    if tid == twin_id and local_twin.has_private:
+                        return unwrap_for_computation(local_twin.private)
+
             # Fall back to received Twin's private
             if arg.has_private:
                 return unwrap_for_computation(arg.private)
@@ -1244,9 +1254,9 @@ class ComputationRequest:
                 # Check global Twin registry for the executing user's version
                 key = (twin_id, context.user)
                 if key in _TWIN_REGISTRY:
-                    local_twin = _TWIN_REGISTRY[key]
-                    if local_twin.has_public:
-                        return unwrap_for_computation(local_twin.public)
+                        local_twin = _TWIN_REGISTRY[key]
+                        if local_twin.has_public:
+                            return unwrap_for_computation(local_twin.public)
 
                 # Also check with arg's owner
                 if owner != context.user:
@@ -1255,6 +1265,11 @@ class ComputationRequest:
                         local_twin = _TWIN_REGISTRY[key]
                         if local_twin.has_public:
                             return unwrap_for_computation(local_twin.public)
+
+                # Fallback: any Twin with matching id
+                for (tid, _owner), local_twin in _TWIN_REGISTRY.items():
+                    if tid == twin_id and local_twin.has_public:
+                        return unwrap_for_computation(local_twin.public)
 
             # Fall back to received Twin's public
             if arg.has_public:
@@ -1505,6 +1520,11 @@ class ComputationRequest:
                         if local_twin.has_private:
                             return unwrap_for_computation(local_twin.private)
 
+                # Fallback: any Twin with matching id
+                for (tid, _owner), local_twin in _TWIN_REGISTRY.items():
+                    if tid == twin_id and local_twin.has_private:
+                        return unwrap_for_computation(local_twin.private)
+
             # Fall back to received Twin's private
             if arg.has_private:
                 return unwrap_for_computation(arg.private)
@@ -1720,6 +1740,11 @@ class ComputationRequest:
 
         # Create ComputationResult with session reference if we have one
         session = getattr(self, "_session", None)
+        if session is None and context is not None:
+            # Fallback to the active session from the executing context if available
+            session = getattr(context, "_active_session", None)
+            if session is not None:
+                self._session = session
         return ComputationResult(
             result=result_twin,
             stdout=private_stdout,
@@ -2084,6 +2109,36 @@ def execute_remote_computation(
                 raise ValueError(f"Remote var ID {var_id[:12]}... not found in registry")
             else:
                 raise ValueError("Cannot resolve remote var reference without context")
+
+        # Check if this is a Twin reference dict (from ComputationRequest serialization)
+        if isinstance(arg, dict) and arg.get("_beaver_twin_ref"):
+            from .twin import _TWIN_REGISTRY
+
+            if context:
+                twin_id = arg["twin_id"]
+                owner = arg.get("owner", context.user)
+
+                # Try to find the owner's version of this Twin
+                key = (twin_id, context.user)
+                if key in _TWIN_REGISTRY:
+                    registered_twin = _TWIN_REGISTRY[key]
+                    if registered_twin.has_private:
+                        return registered_twin.private
+
+                # Also check with arg's owner
+                if owner != context.user:
+                    key = (twin_id, owner)
+                    if key in _TWIN_REGISTRY:
+                        registered_twin = _TWIN_REGISTRY[key]
+                        if registered_twin.has_private:
+                            return registered_twin.private
+
+                raise ValueError(
+                    f"Twin reference '{arg.get('name', 'unknown')}' "
+                    f"(ID: {twin_id[:12]}...) not found in registry"
+                )
+            else:
+                raise ValueError("Cannot resolve Twin reference without context")
 
         # Check if this is a Twin - look it up in global Twin registry and unwrap to private data
         from .twin import _TWIN_REGISTRY, Twin

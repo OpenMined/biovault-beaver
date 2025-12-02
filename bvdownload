@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""
+bvdownload - Download sharded and compressed files from biovault-data
+
+Usage:
+    bvdownload <yaml_url> <destination_path>
+
+Example:
+    bvdownload https://github.com/OpenMined/biovault-data/blob/main/single_cell/sample1/file.h5ad.yaml ./
+"""
+
+import sys
+import os
+import tempfile
+import hashlib
+from pathlib import Path
+from urllib.parse import urlparse
+import urllib.request
+import yaml
+import zstandard as zstd
+
+
+def convert_github_url(url):
+    """Convert GitHub blob URL to raw content URL"""
+    if "github.com" in url and "/blob/" in url:
+        return url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+    return url
+
+
+def get_base_url(yaml_url):
+    """Extract base directory URL from YAML file URL"""
+    return yaml_url.rsplit("/", 1)[0] + "/"
+
+
+def download_file(url, dest_path, desc="Downloading"):
+    """Download file with progress reporting"""
+    print(f"{desc}: {url}")
+
+    try:
+        with urllib.request.urlopen(url) as response:
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+
+            with open(dest_path, 'wb') as f:
+                while True:
+                    chunk = response.read(8192)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    if total_size > 0:
+                        pct = (downloaded / total_size) * 100
+                        print(f"\r  Progress: {downloaded:,} / {total_size:,} bytes ({pct:.1f}%)", end="")
+
+            if total_size > 0:
+                print()  # New line after progress
+
+    except Exception as e:
+        print(f"\n  Error downloading: {e}")
+        raise
+
+
+def compute_blake3(file_path):
+    """Compute BLAKE3 hash of a file"""
+    try:
+        import blake3
+        hasher = blake3.blake3()
+        with open(file_path, 'rb') as f:
+            while chunk := f.read(8192):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except ImportError:
+        # Fallback to b3sum command if blake3 module not available
+        import subprocess
+        result = subprocess.run(['b3sum', file_path], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"b3sum failed: {result.stderr}")
+        return result.stdout.split()[0]
+
+
+def verify_checksum(file_path, expected_hash, desc=""):
+    """Verify BLAKE3 checksum"""
+    print(f"  Verifying {desc}...")
+    actual_hash = compute_blake3(file_path)
+
+    if actual_hash != expected_hash:
+        raise ValueError(
+            f"Checksum mismatch for {desc}!\n"
+            f"  Expected: {expected_hash}\n"
+            f"  Got:      {actual_hash}"
+        )
+    print(f"  ✓ Checksum verified")
+
+
+def combine_shards(shard_paths, output_path):
+    """Combine shard files into single file"""
+    print(f"  Combining {len(shard_paths)} shards...")
+
+    with open(output_path, 'wb') as outfile:
+        for shard_path in shard_paths:
+            with open(shard_path, 'rb') as infile:
+                while chunk := infile.read(8192):
+                    outfile.write(chunk)
+
+    print(f"  ✓ Combined into {output_path}")
+
+
+def decompress_zstd(compressed_path, output_path):
+    """Decompress zstd file"""
+    print(f"  Decompressing zstd...")
+
+    dctx = zstd.ZstdDecompressor()
+
+    with open(compressed_path, 'rb') as ifh:
+        with open(output_path, 'wb') as ofh:
+            dctx.copy_stream(ifh, ofh)
+
+    print(f"  ✓ Decompressed to {output_path}")
+
+
+def main():
+    if len(sys.argv) != 3:
+        print(__doc__)
+        sys.exit(1)
+
+    yaml_url = sys.argv[1]
+    dest_arg = sys.argv[2]
+
+    # Convert GitHub URL if needed
+    yaml_url = convert_github_url(yaml_url)
+
+    print(f"bvdownload - Fetching manifest...")
+    print(f"  URL: {yaml_url}\n")
+
+    # Download and parse YAML manifest
+    with tempfile.NamedTemporaryFile(mode='w+', suffix='.yaml', delete=False) as tmp_yaml:
+        tmp_yaml_path = tmp_yaml.name
+
+    try:
+        download_file(yaml_url, tmp_yaml_path, "Downloading manifest")
+
+        with open(tmp_yaml_path, 'r') as f:
+            manifest = yaml.safe_load(f)
+
+        print(f"\n📦 File: {manifest['file']['original']}")
+        print(f"   Size: {manifest['file']['original_size_bytes']:,} bytes")
+        print(f"   Shards: {len(manifest['file']['shards'])}")
+        print(f"   Compression: {manifest['compression']}\n")
+
+        # Determine output path
+        original_filename = manifest['file']['original']
+
+        if os.path.isdir(dest_arg):
+            output_path = Path(dest_arg) / original_filename
+        else:
+            output_path = Path(dest_arg)
+
+        output_path = output_path.resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Create temp directory for downloads
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            base_url = get_base_url(yaml_url)
+
+            # Download shards
+            print("Step 1: Downloading shards")
+            shard_paths = []
+
+            for i, shard in enumerate(manifest['file']['shards']):
+                shard_name = shard['name']
+                shard_url = base_url + shard_name
+                shard_path = tmpdir_path / shard_name
+
+                download_file(shard_url, shard_path, f"  Shard {i+1}/{len(manifest['file']['shards'])}")
+                verify_checksum(shard_path, shard['b3sum'], f"shard {shard_name}")
+                shard_paths.append(shard_path)
+                print()
+
+            # Combine shards
+            print("Step 2: Combining shards")
+            compressed_path = tmpdir_path / manifest['file']['compressed']
+            combine_shards(shard_paths, compressed_path)
+            verify_checksum(compressed_path, manifest['file']['compressed_b3sum'], "combined file")
+            print()
+
+            # Decompress
+            print("Step 3: Decompressing")
+            decompress_zstd(compressed_path, output_path)
+            verify_checksum(output_path, manifest['file']['original_b3sum'], "final file")
+            print()
+
+        print(f"✅ Success! File written to:\n   {output_path}\n")
+
+    finally:
+        # Cleanup temp YAML
+        if os.path.exists(tmp_yaml_path):
+            os.remove(tmp_yaml_path)
+
+
+if __name__ == '__main__':
+    main()

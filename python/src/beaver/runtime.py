@@ -843,7 +843,7 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         if backend and backend.uses_crypto:
             # Wait for file to appear AND stabilize (sync in progress) with timeout
             import time as _time
-            spinner = None
+
             spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
             spin_idx = 0
 
@@ -1039,6 +1039,136 @@ def _inject(obj: Any, *, globals_ns: dict, name_hint: Optional[str]) -> list[str
     Returns:
         List of names used to inject the object
     """
+    # Merge Twins by twin_id when an existing instance is already present.
+    # Only fill in sides (public/private) that are currently missing to avoid clobbering local data.
+    try:
+        from .twin import _TWIN_REGISTRY as twin_registry  # noqa: N811
+        from .twin import Twin as twin_cls  # noqa: N813
+    except Exception:
+        twin_cls = None
+        twin_registry = {}
+
+    if twin_cls and isinstance(obj, twin_cls):
+        twin_id = getattr(obj, "twin_id", None)
+        existing = None
+
+        # Check globals for an existing Twin with the same id
+        if twin_id:
+            for val in globals_ns.values():
+                if isinstance(val, twin_cls) and getattr(val, "twin_id", None) == twin_id:
+                    existing = val
+                    break
+
+        # Fallback to registry
+        if existing is None and twin_id:
+            for (tid, _owner), tw in twin_registry.items():
+                if tid == twin_id:
+                    existing = tw
+                    break
+
+        def _merge_twin(dst: twin_cls, src: twin_cls):
+            # Lazy import to avoid cycles
+            try:
+                from .computation import ComputationRequest as computation_request_cls  # noqa: N813
+            except Exception:
+                computation_request_cls = None
+
+            # If dst holds a request placeholder and src carries the matching result twin_id,
+            # treat them as the same Twin and update the ID to the resolved one.
+            dst_private = getattr(dst, "private", None)
+            placeholder_id = None
+            if computation_request_cls is not None and isinstance(
+                dst_private, computation_request_cls
+            ):
+                placeholder_id = getattr(dst_private, "result_id", None)
+                if placeholder_id and getattr(src, "twin_id", None) == placeholder_id:
+                    with contextlib.suppress(Exception):
+                        del twin_registry[(dst.twin_id, dst.owner)]
+                    dst.twin_id = src.twin_id
+                    twin_registry[(dst.twin_id, dst.owner)] = dst
+
+            # Fill in missing sides only
+            if getattr(dst, "public", None) is None and getattr(src, "public", None) is not None:
+                dst.public = src.public
+                if hasattr(src, "public_stdout"):
+                    dst.public_stdout = getattr(src, "public_stdout", None)
+                if hasattr(src, "public_stderr"):
+                    dst.public_stderr = getattr(src, "public_stderr", None)
+                if hasattr(src, "public_figures"):
+                    dst.public_figures = getattr(src, "public_figures", None)
+
+            # Treat a ComputationRequest placeholder as "missing private"
+            private_missing = dst_private is None or (
+                computation_request_cls is not None
+                and isinstance(dst_private, computation_request_cls)
+            )
+
+            # Check if this is an idempotent reload (same result loaded twice)
+            # This happens when auto-load updates the Twin, then user manually loads from inbox
+            src_private = getattr(src, "private", None)
+            is_idempotent_reload = False
+            if dst_private is not None and src_private is not None:
+                # Both have values - check if they're compatible (same type)
+                from .twin import CapturedFigure
+
+                # If both are CapturedFigure or same basic type, allow idempotent reload
+                if (
+                    isinstance(dst_private, CapturedFigure)
+                    and isinstance(src_private, CapturedFigure)
+                ) or (type(dst_private).__name__ == type(src_private).__name__):
+                    is_idempotent_reload = True
+
+            def _log_merge(action: str, reason: str):
+                print(
+                    f"🔄 Twin merge {action} private "
+                    f"(dst_id={dst.twin_id[:12]}..., src_id={getattr(src, 'twin_id', '')[:12]}..., "
+                    f"dst_private={type(dst_private).__name__}, src_private={type(src_private).__name__}, "
+                    f"placeholder={private_missing}, reason={reason})"
+                )
+
+            if src_private is not None:
+                if (
+                    private_missing
+                    or getattr(src, "force_private_replace", False)
+                    or is_idempotent_reload
+                ):
+                    if is_idempotent_reload and not private_missing:
+                        _log_merge("updating", "idempotent_reload")
+                    else:
+                        _log_merge("updating", "missing_or_forced")
+                    dst.private = src.private
+                    if hasattr(src, "private_stdout"):
+                        dst.private_stdout = getattr(src, "private_stdout", None)
+                    if hasattr(src, "private_stderr"):
+                        dst.private_stderr = getattr(src, "private_stderr", None)
+                    if hasattr(src, "private_figures"):
+                        dst.private_figures = getattr(src, "private_figures", None)
+                else:
+                    _log_merge("skipped", "dst_private_already_set")
+            # Keep registry in sync
+            twin_registry[(dst.twin_id, dst.owner)] = dst
+
+        if existing:
+            _merge_twin(existing, obj)
+            obj = existing
+
+            # Sync all Twin instances with same twin_id to point to canonical merged object
+            # This returns the canonical Twin (which may be different from 'existing')
+            from .twin import _sync_twin_instances
+
+            canonical = _sync_twin_instances(twin_id, existing.owner, existing)
+            if canonical is not None:
+                obj = canonical  # Use the canonical Twin for injection
+                # Update registry to point to canonical
+                twin_registry[(twin_id, canonical.owner)] = canonical
+        else:
+            if twin_id:
+                print(
+                    f"⚠️ Twin merge: no existing Twin with id {twin_id[:12]}... "
+                    f"found in globals/registry for owner '{obj.owner}'. "
+                    "Creating new instance; public/private may stay split."
+                )
+
     if isinstance(obj, dict):
         globals_ns.update(obj)
         return list(obj.keys())
@@ -1522,6 +1652,7 @@ def export(
                 stdout_capture = io.StringIO()
                 stderr_capture = io.StringIO()
                 captured_figures = []
+                captured_fig_ids = set()
 
                 # Try to capture matplotlib figures
                 try:
@@ -1613,7 +1744,6 @@ def export(
                         figures_to_capture.update(extract_axes_figures(public_result))
 
                         # Capture all unique figures
-                        captured_fig_ids = set()
                         for fig in figures_to_capture:
                             if id(fig) in captured_fig_ids:
                                 continue
@@ -1637,6 +1767,40 @@ def export(
                         plt.close("all")
                         with contextlib.suppress(Exception):
                             matplotlib.use(original_backend, force=True)
+
+                    # Deduplicate captured figures by content
+                    import hashlib
+
+                    seen_signatures = set()
+                    deduped_figures = []
+
+                    def figure_signature(png_bytes: bytes):
+                        """Stable signature of figure pixels to catch duplicates with different metadata."""
+                        if not png_bytes:
+                            return None
+                        try:
+                            from PIL import Image
+
+                            with Image.open(io.BytesIO(png_bytes)) as img:
+                                raw_bytes = img.tobytes()
+                                digest = hashlib.sha256()
+                                digest.update(str(img.size).encode())
+                                digest.update(img.mode.encode())
+                                digest.update(raw_bytes)
+                                return digest.digest()
+                        except Exception:
+                            return hashlib.sha256(png_bytes).digest()
+
+                    for fig in captured_figures:
+                        png_bytes = fig.png_bytes if hasattr(fig, "png_bytes") else None
+                        signature = figure_signature(png_bytes) if png_bytes else None
+                        if signature and signature in seen_signatures:
+                            continue
+                        if signature:
+                            seen_signatures.add(signature)
+                        deduped_figures.append(fig)
+
+                    captured_figures = deduped_figures
 
                     public_stdout = stdout_capture.getvalue()
                     public_stderr = stderr_capture.getvalue()
@@ -1689,13 +1853,21 @@ def export(
                 # Find session from input Twins (if any)
                 input_session = None
                 for arg in args:
-                    if isinstance(arg, Twin) and hasattr(arg, "_session") and arg._session is not None:
+                    if (
+                        isinstance(arg, Twin)
+                        and hasattr(arg, "_session")
+                        and arg._session is not None
+                    ):
                         input_session = arg._session
                         break
                 for val in kwargs.values():
                     if input_session:
                         break
-                    if isinstance(val, Twin) and hasattr(val, "_session") and val._session is not None:
+                    if (
+                        isinstance(val, Twin)
+                        and hasattr(val, "_session")
+                        and val._session is not None
+                    ):
                         input_session = val._session
                         break
 
@@ -1709,6 +1881,7 @@ def export(
                     private=comp_request,  # Computation request, not result yet
                     owner=destination_user or "unknown",
                     name=name or f"{func.__name__}_result",
+                    twin_id=comp_request.result_id,
                 )
 
                 # Inherit session from input Twins so request_private() uses session folder

@@ -14,6 +14,123 @@ from .remote_data import RemoteData
 _TWIN_REGISTRY = {}
 
 
+def _sync_twin_instances(twin_id: str, owner: str, source_twin):
+    """
+    Sync all Twin instances with the same twin_id across globals to match source_twin.
+
+    This ensures that all variables (e.g., 'violin_result' and 'make_violin_result')
+    that reference Twins with the same twin_id point to the same canonical object.
+    """
+    import inspect
+
+    # Collect all potential global namespaces to search
+    namespaces_to_check = []
+
+    # Get the caller's globals by walking up the stack
+    frame = inspect.currentframe()
+    if frame:
+        current_frame = frame.f_back
+        while current_frame:
+            frame_globals = current_frame.f_globals
+            # Add any globals we find (prefer __main__ or ipykernel)
+            if frame_globals not in namespaces_to_check:
+                namespaces_to_check.append(frame_globals)
+            current_frame = current_frame.f_back
+
+    # Also try to get IPython's user namespace if available
+    try:
+        import IPython
+
+        ipython = IPython.get_ipython()
+        if ipython and hasattr(ipython, "user_ns") and ipython.user_ns not in namespaces_to_check:
+            namespaces_to_check.append(ipython.user_ns)
+    except (ImportError, AttributeError):
+        pass
+
+    # Find all Twin instances and choose the canonical one
+    all_twins = []  # List of (var_name, var_value, namespace)
+
+    # Import here to avoid circular dependency
+    try:
+        from .computation import ComputationRequest as computation_request_cls  # noqa: N813
+    except ImportError:
+        computation_request_cls = None
+
+    for namespace in namespaces_to_check:
+        for _var_name, var_value in list(namespace.items()):
+            # Skip private variables and modules
+            if _var_name.startswith("_") or _var_name in ("In", "Out"):
+                continue
+
+            if isinstance(var_value, Twin):
+                var_twin_id = getattr(var_value, "twin_id", None)
+                var_owner = getattr(var_value, "owner", None)
+
+                if var_twin_id == twin_id and var_owner == owner:
+                    all_twins.append((_var_name, var_value, namespace))
+
+    if not all_twins:
+        return
+
+    # Choose canonical Twin: prefer one with public data, or source_twin, or first found
+    canonical = source_twin
+    for _var_name, var_value, _namespace in all_twins:
+        # Prefer Twin that has public data (it's the original local Twin)
+        if getattr(var_value, "public", None) is not None:
+            canonical = var_value
+            break
+
+    # Merge data from all Twins (including source_twin) into canonical
+    twins_to_merge = [source_twin] + [t[1] for t in all_twins if t[1] is not canonical]
+
+    for twin in twins_to_merge:
+        if twin is canonical:
+            continue
+
+        # Merge private if canonical is missing it or has placeholder
+        canonical_private = getattr(canonical, "private", None)
+        is_placeholder = computation_request_cls is not None and isinstance(
+            canonical_private, computation_request_cls
+        )
+
+        if (canonical_private is None or is_placeholder) and twin.private is not None:
+            object.__setattr__(canonical, "private", twin.private)
+            if hasattr(twin, "private_stdout"):
+                canonical.private_stdout = getattr(twin, "private_stdout", None)
+            if hasattr(twin, "private_stderr"):
+                canonical.private_stderr = getattr(twin, "private_stderr", None)
+            if hasattr(twin, "private_figures"):
+                canonical.private_figures = getattr(twin, "private_figures", None)
+
+        # Merge public if canonical is missing it
+        if getattr(canonical, "public", None) is None and getattr(twin, "public", None) is not None:
+            object.__setattr__(canonical, "public", twin.public)
+            if hasattr(twin, "public_stdout"):
+                canonical.public_stdout = getattr(twin, "public_stdout", None)
+            if hasattr(twin, "public_stderr"):
+                canonical.public_stderr = getattr(twin, "public_stderr", None)
+            if hasattr(twin, "public_figures"):
+                canonical.public_figures = getattr(twin, "public_figures", None)
+
+    # Now make all variables point to the canonical Twin
+    updated_vars = []
+    for var_name, var_value, namespace in all_twins:
+        if var_value is not canonical:
+            namespace[var_name] = canonical
+            updated_vars.append(var_name)
+
+    if updated_vars:
+        print(
+            f"🔄 Synced {len(updated_vars)} variable(s) to canonical Twin: {', '.join(updated_vars)}"
+        )
+        print(
+            f"   Canonical has: public={'✓' if canonical.public else '✗'}, private={'✓' if canonical.private else '✗'}"
+        )
+
+    # Return the canonical Twin so caller can use it
+    return canonical
+
+
 class CapturedFigure:
     """Wrapper for captured matplotlib figure data that displays nicely in Jupyter."""
 
@@ -140,9 +257,64 @@ class Twin(LiveMixin, RemoteData):
         # Source tracking for subscribers (where to reload from)
         self._source_path: Optional[str] = None  # Path to reload published data from
 
-        # Register in global registry if this Twin has private data
-        if self.private is not None:
-            key = (self.twin_id, self.owner)
+        # Register/merge in global registry
+        key = (self.twin_id, self.owner)
+        existing = _TWIN_REGISTRY.get(key)
+        if existing and existing is not self:
+            try:
+                from .computation import (
+                    ComputationRequest as computation_request_cls,  # type: ignore  # noqa: N813
+                )
+            except Exception:
+                computation_request_cls = None  # type: ignore
+
+            # Merge public if existing lacks it
+            if (
+                getattr(existing, "public", None) is None
+                and getattr(self, "public", None) is not None
+            ):
+                existing.public = self.public
+                if hasattr(self, "public_stdout"):
+                    existing.public_stdout = getattr(self, "public_stdout", None)
+                if hasattr(self, "public_stderr"):
+                    existing.public_stderr = getattr(self, "public_stderr", None)
+                if hasattr(self, "public_figures"):
+                    existing.public_figures = getattr(self, "public_figures", None)
+
+            # Merge private if existing lacks it or only has placeholder request
+            existing_priv = getattr(existing, "private", None)
+            is_placeholder = computation_request_cls is not None and isinstance(
+                existing_priv, computation_request_cls
+            )
+
+            # Check for idempotent reload (same result type loaded twice)
+            self_priv = getattr(self, "private", None)
+            is_idempotent = False
+            if (
+                existing_priv is not None
+                and self_priv is not None
+                and (
+                    (
+                        isinstance(existing_priv, CapturedFigure)
+                        and isinstance(self_priv, CapturedFigure)
+                    )
+                    or (type(existing_priv).__name__ == type(self_priv).__name__)
+                )
+            ):
+                is_idempotent = True
+
+            if (existing_priv is None or is_placeholder or is_idempotent) and self_priv is not None:
+                existing.private = self.private
+                if hasattr(self, "private_stdout"):
+                    existing.private_stdout = getattr(self, "private_stdout", None)
+                if hasattr(self, "private_stderr"):
+                    existing.private_stderr = getattr(self, "private_stderr", None)
+                if hasattr(self, "private_figures"):
+                    existing.private_figures = getattr(self, "private_figures", None)
+
+            # Keep registry pointing at the original instance
+            _TWIN_REGISTRY[key] = existing
+        else:
             _TWIN_REGISTRY[key] = self
 
     def __getstate__(self):
@@ -445,11 +617,11 @@ class Twin(LiveMixin, RemoteData):
         import inspect
         from pathlib import Path
 
-        from .computation import ComputationRequest
+        from .computation import ComputationRequest as computation_request_cls  # noqa: N813
         from .runtime import _get_var_name_from_caller, pack, write_envelope
 
         # Check if private is a ComputationRequest (result Twin)
-        if isinstance(self.private, ComputationRequest):
+        if isinstance(self.private, computation_request_cls):
             # Auto-detect context if not provided
             if context is None:
                 frame = inspect.currentframe()
@@ -496,9 +668,51 @@ class Twin(LiveMixin, RemoteData):
                 name=default_request_name,
             )
 
-            # Send to owner's inbox
-            dest_dir = Path(context.outbox).parent / self.owner
-            path = write_envelope(env, out_dir=dest_dir)
+            # Helper to convert envelope to bytes for encrypted writes
+            def env_to_bytes(envelope):
+                import json
+
+                from .runtime import _envelope_record
+
+                return json.dumps(_envelope_record(envelope), indent=2).encode("utf-8")
+
+            # Determine destination: use session folder if available, otherwise fall back
+            backend = getattr(context, "_backend", None)
+
+            if hasattr(self, "_session") and self._session is not None:
+                # Write to our session folder (peer can read it via sync)
+                dest_dir = self._session.local_folder
+                print(f"📤 Writing to session folder: {dest_dir}")
+                # Use backend's write_envelope for encryption if available
+                if backend and backend.uses_crypto:
+                    dest_path = dest_dir / env.filename()
+                    backend.storage.write_with_shadow(
+                        absolute_path=str(dest_path),
+                        data=env_to_bytes(env),
+                        recipients=[self.owner],
+                        hint="computation-request",
+                        overwrite=True,
+                    )
+                    path = dest_path
+                else:
+                    path = write_envelope(env, out_dir=dest_dir)
+            else:
+                # Fallback: send to owner's shared folder (legacy path)
+                dest_dir = Path(context.outbox).parent / self.owner
+                # Use backend for encryption if available
+                if backend and backend.uses_crypto:
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    dest_path = dest_dir / env.filename()
+                    backend.storage.write_with_shadow(
+                        absolute_path=str(dest_path),
+                        data=env_to_bytes(env),
+                        recipients=[self.owner],
+                        hint="computation-request",
+                        overwrite=True,
+                    )
+                    path = dest_path
+                else:
+                    path = write_envelope(env, out_dir=dest_dir)
 
             print(f"✓ Sent to {path}")
             print(f"💡 Result will auto-update when {self.owner} approves")
@@ -507,9 +721,12 @@ class Twin(LiveMixin, RemoteData):
             self._pending_comp_id = self.private.comp_id
 
             # Register this Twin for auto-updates
+            # Use the canonical Twin from registry (might be different from self due to __post_init__ merge)
             from .computation import _register_twin_result
 
-            _register_twin_result(self.private.comp_id, self)
+            key = (self.twin_id, self.owner)
+            canonical_twin = _TWIN_REGISTRY.get(key, self)
+            _register_twin_result(self.private.comp_id, canonical_twin)
 
         else:
             # Data Twin - request access to private data
@@ -669,12 +886,17 @@ class Twin(LiveMixin, RemoteData):
     # Delegation methods
     # ===================================================================
 
+    def __bool__(self):
+        """Always truthy; prevents bool() from calling __len__ on non-sized values."""
+        return True
+
     def __len__(self):
         """Delegate len() to preferred value."""
         try:
             return len(self.value)
-        except (TypeError, ValueError) as err:
-            raise TypeError("Twin has no len()") from err
+        except (TypeError, ValueError):
+            # Fall back to 1 so truthiness checks don't explode on figure/None
+            return 1
 
     def __getitem__(self, key):
         """Delegate indexing to preferred value."""

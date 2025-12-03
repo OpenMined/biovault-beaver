@@ -388,7 +388,7 @@ def _update_twin_result(comp_id: str, result_value: Any):
         existing_twin = _TWIN_RESULTS[comp_id]
 
         # Check if received value is a Twin - if so, merge its properties
-        from .twin import Twin
+        from .twin import Twin, _sync_twin_instances
 
         if isinstance(result_value, Twin):
             # Merge received Twin's properties into existing Twin
@@ -414,6 +414,9 @@ def _update_twin_result(comp_id: str, result_value: Any):
                 f"✨ Twin result auto-updated: {existing_twin.name or existing_twin.twin_id[:8]}..."
             )
             print("   .private now contains the approved result")
+
+        # Sync all Twin instances with the same twin_id to point to the canonical object
+        _sync_twin_instances(existing_twin.twin_id, existing_twin.owner, existing_twin)
 
         # Remove from registry after updating
         del _TWIN_RESULTS[comp_id]
@@ -494,7 +497,14 @@ class ComputationResult:
     var_id: str
     comp_id: str
     sender: str
+    result_id: Optional[str] = None
     context: Any = None
+    session: Any = None  # Session reference for session-scoped results
+
+    def __post_init__(self):
+        # Ensure result_id always set; default to var_id if not provided
+        if not self.result_id:
+            self.result_id = self.var_id
 
     @property
     def data(self):
@@ -609,7 +619,10 @@ class ComputationResult:
 
         if isinstance(self.result, Twin):
             if self.result.has_private:
-                print(f"✅ Approving result for: {self.var_name}")
+                print(
+                    f"✅ Approving result for: {self.var_name} "
+                    f"(twin_id={self.result.twin_id[:12]}..., comp_id={self.comp_id[:12]}..., result_id={self.result_id[:12]})"
+                )
                 # Extract just the private value - don't send the whole Twin
                 # The requester already ran mock locally, they just need the private result
                 private_value = self.result.private
@@ -653,7 +666,10 @@ class ComputationResult:
 
         if isinstance(self.result, Twin):
             if self.result.has_public:
-                print(f"🧪 Approving mock/public result for: {self.var_name}")
+                print(
+                    f"🧪 Approving mock/public result for: {self.var_name} "
+                    f"(twin_id={self.result.twin_id[:12]}..., comp_id={self.comp_id[:12]}..., result_id={self.result_id[:12]})"
+                )
                 print("   💡 Requester can continue development with mock data")
                 return self._send_result(self.result.public)
             else:
@@ -687,15 +703,27 @@ class ComputationResult:
             "rejected_at": _iso_now(),
         }
 
-        # Send rejection back
-        result = self.context.send(
-            rejection,
-            name=f"rejection_{self.var_name}",
-            user=self.sender,
-            reply_to=self.comp_id,
-        )
+        # Send rejection back - use session folder if available
+        if self.session is not None:
+            from .runtime import pack, write_envelope
 
-        print(f"✓ Rejection sent to {self.sender}'s inbox")
+            env = pack(
+                rejection,
+                sender=self.context.user,
+                name=f"rejection_{self.var_name}",
+                reply_to=self.comp_id,
+            )
+            dest_dir = self.session.local_folder
+            result = write_envelope(env, out_dir=dest_dir)
+            print(f"✓ Rejection sent to session folder: {dest_dir}")
+        else:
+            result = self.context.send(
+                rejection,
+                name=f"rejection_{self.var_name}",
+                user=self.sender,
+                reply_to=self.comp_id,
+            )
+            print(f"✓ Rejection sent to {self.sender}'s inbox")
         return result
 
     def _send_result(
@@ -907,6 +935,7 @@ class ComputationResult:
             private=value_to_send,
             owner=self.context.user,
             name=self.var_name,
+            twin_id=self.result_id,
         )
 
         # Attach captured outputs to the Twin
@@ -919,15 +948,78 @@ class ComputationResult:
                 result_twin.private_figures = convert_figures_for_sending(captured_figures)
 
         # Send the result Twin back as a reply
-        result = self.context.send(
-            result_twin,
-            name=self.var_name,
-            user=self.sender,
-            reply_to=self.comp_id,
-            preserve_private=True,
-        )
+        # Use session folder if available, otherwise fall back to user inbox
+        if self.session is not None:
+            # Write to our session folder (peer can read it via sync)
+            from .runtime import pack, write_envelope
 
-        print(f"✓ Result sent to {self.sender}'s inbox")
+            dest_dir = self.session.local_folder
+
+            # Determine backend and recipients for encryption
+            # In SyftBox, data is encrypted FOR THE RECIPIENT (peer) only
+            backend = None
+            recipients = None
+            if self.context and hasattr(self.context, "_backend") and self.context._backend:
+                backend = self.context._backend
+                if backend.uses_crypto:
+                    # Encrypt for the sender who requested the computation
+                    recipients = [self.sender]
+
+            # Preserve private side when wrapping in Twin so it survives serialization
+            preserve_private = isinstance(result_twin, Twin) and result_twin.has_private
+
+            env = pack(
+                result_twin,
+                sender=self.context.user,
+                name=self.var_name,
+                reply_to=self.comp_id,
+                artifact_dir=dest_dir,
+                backend=backend,
+                recipients=recipients,
+                preserve_private=preserve_private,
+            )
+
+            # Write envelope (encrypted if backend available)
+            if backend and backend.uses_crypto and recipients:
+                import base64
+                import json
+
+                record = {
+                    "version": env.version,
+                    "envelope_id": env.envelope_id,
+                    "sender": env.sender,
+                    "created_at": env.created_at,
+                    "name": env.name,
+                    "inputs": env.inputs,
+                    "outputs": env.outputs,
+                    "requirements": env.requirements,
+                    "manifest": env.manifest,
+                    "reply_to": env.reply_to,
+                    "payload_b64": base64.b64encode(env.payload).decode("ascii"),
+                }
+                content = json.dumps(record, indent=2).encode("utf-8")
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                data_path = dest_dir / env.filename()
+                backend.storage.write_with_shadow(
+                    str(data_path),
+                    content,
+                    recipients=recipients,
+                    hint="beaver-envelope",
+                )
+                result = data_path
+            else:
+                result = write_envelope(env, out_dir=dest_dir)
+            print(f"✓ Result sent to session folder: {dest_dir}")
+        else:
+            # Fallback: send to user's inbox (legacy path)
+            result = self.context.send(
+                result_twin,
+                name=self.var_name,
+                user=self.sender,
+                reply_to=self.comp_id,
+                preserve_private=True,
+            )
+            print(f"✓ Result sent to {self.sender}'s inbox")
         print(f"💡 They can load it with: bv.inbox()['{self.var_name}'].load()")
 
         return result
@@ -1135,6 +1227,8 @@ class ComputationRequest:
             print(f"✓ Result: {type(result_data['result']).__name__}")
 
         # Return a ComputationResult object instead of raw dict
+        # Pass session reference if we have one
+        session = getattr(self, "_session", None)
         return ComputationResult(
             result=result_data["result"],
             stdout=result_data["stdout"],
@@ -1142,9 +1236,11 @@ class ComputationRequest:
             error=result_data["error"],
             var_name=self.result_name,
             var_id=self.result_id,
+            result_id=self.result_id,
             comp_id=self.comp_id,
             sender=self.sender,
             context=context,
+            session=session,
         )
 
     def run(self, context=None):
@@ -1184,6 +1280,11 @@ class ComputationRequest:
                         if local_twin.has_private:
                             return unwrap_for_computation(local_twin.private)
 
+                # Fallback: any Twin with matching id
+                for (tid, _owner), local_twin in _TWIN_REGISTRY.items():
+                    if tid == twin_id and local_twin.has_private:
+                        return unwrap_for_computation(local_twin.private)
+
             # Fall back to received Twin's private
             if arg.has_private:
                 return unwrap_for_computation(arg.private)
@@ -1193,9 +1294,40 @@ class ComputationRequest:
         if context is None:
             context = self._auto_detect_context()
 
+        def resolve_twin_ref(val):
+            """Convert Twin reference dicts back into local Twin instances if available."""
+            if isinstance(val, dict) and val.get("_beaver_twin_ref"):
+                from .twin import _TWIN_REGISTRY, Twin
+
+                twin_id = val["twin_id"]
+                owner_hint = val.get("owner")
+                if owner_hint and (twin_id, owner_hint) in _TWIN_REGISTRY:
+                    return _TWIN_REGISTRY[(twin_id, owner_hint)]
+                if context and (twin_id, context.user) in _TWIN_REGISTRY:
+                    return _TWIN_REGISTRY[(twin_id, context.user)]
+                # Fallback: search any registered Twin by id
+                for (tid, _owner), twin in _TWIN_REGISTRY.items():
+                    if tid == twin_id:
+                        return twin
+                # Last chance: search context.remote_vars stored values
+                if context and hasattr(context, "remote_vars"):
+                    for var in context.remote_vars.vars.values():
+                        sv = getattr(var, "_stored_value", None)
+                        if isinstance(sv, Twin) and sv.twin_id == twin_id:
+                            # Register for future lookups
+                            _TWIN_REGISTRY[(sv.twin_id, sv.owner)] = sv
+                            return sv
+                raise ValueError(
+                    f"Twin reference '{val.get('name', 'unknown')}' (ID: {twin_id[:12]}...) not available locally"
+                )
+            return val
+
+        resolved_args = tuple(resolve_twin_ref(a) for a in self.args)
+        resolved_kwargs = {k: resolve_twin_ref(v) for k, v in self.kwargs.items()}
+
         # Replace Twin arguments with their private sides (preferring local Twin)
         private_args = []
-        for arg in self.args:
+        for arg in resolved_args:
             if isinstance(arg, Twin):
                 private_data = get_local_twin_private(arg)
                 if private_data is not None:
@@ -1206,7 +1338,7 @@ class ComputationRequest:
                 private_args.append(arg)
 
         private_kwargs = {}
-        for key, val in self.kwargs.items():
+        for key, val in resolved_kwargs.items():
             if isinstance(val, Twin):
                 private_data = get_local_twin_private(val)
                 if private_data is not None:
@@ -1220,6 +1352,30 @@ class ComputationRequest:
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
         captured_figures = []
+        captured_fig_ids = set()
+
+        def _capture_figure(fig):
+            """Save a matplotlib figure to PNG once per figure id."""
+            nonlocal captured_figures, captured_fig_ids
+            if fig is None:
+                return
+            if id(fig) in captured_fig_ids:
+                return
+            captured_fig_ids.add(id(fig))
+            buf = io.BytesIO()
+            try:
+                fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+                buf.seek(0)
+                captured_figures.append(
+                    CapturedFigure(
+                        {
+                            "figure": None,
+                            "png_bytes": buf.getvalue(),
+                        }
+                    )
+                )
+            except Exception:
+                pass
 
         # Try to capture matplotlib figures
         try:
@@ -1238,23 +1394,9 @@ class ComputationRequest:
 
             def capturing_show(*_args, **_kwargs):
                 """Capture all current figures when show() is called."""
-                nonlocal captured_figures
                 for fig_num in plt.get_fignums():
                     fig = plt.figure(fig_num)
-                    buf = io.BytesIO()
-                    try:
-                        fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
-                        buf.seek(0)
-                        captured_figures.append(
-                            CapturedFigure(
-                                {
-                                    "figure": None,
-                                    "png_bytes": buf.getvalue(),
-                                }
-                            )
-                        )
-                    except Exception:
-                        pass
+                    _capture_figure(fig)
 
             plt.show = capturing_show
 
@@ -1303,25 +1445,8 @@ class ComputationRequest:
                 figures_to_capture.update(extract_axes_figures(private_result))
 
                 # Capture all unique figures
-                captured_fig_ids = set()
                 for fig in figures_to_capture:
-                    if id(fig) in captured_fig_ids:
-                        continue
-                    captured_fig_ids.add(id(fig))
-                    buf = io.BytesIO()
-                    try:
-                        fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
-                        buf.seek(0)
-                        captured_figures.append(
-                            CapturedFigure(
-                                {
-                                    "figure": fig,
-                                    "png_bytes": buf.getvalue(),
-                                }
-                            )
-                        )
-                    except Exception:
-                        pass
+                    _capture_figure(fig)
                     plt.close(fig)
 
                 # Clean up and restore original backend
@@ -1355,6 +1480,7 @@ class ComputationRequest:
                 public=None,
                 owner=context.user if context else "unknown",
                 name=self.result_name,
+                twin_id=self.result_id,
             )
             result_twin.private_stdout = stdout_str
             result_twin.private_stderr = stderr_str
@@ -1365,7 +1491,8 @@ class ComputationRequest:
         # Store for later retrieval after approval
         _TWIN_RESULTS[self.comp_id] = result_twin
 
-        # Create ComputationResult
+        # Create ComputationResult with session reference if we have one
+        session = getattr(self, "_session", None)
         comp_result = ComputationResult(
             result=result_twin,
             stdout=stdout_str,
@@ -1373,9 +1500,11 @@ class ComputationRequest:
             error=error,
             var_name=self.result_name,
             var_id=self.result_id,
+            result_id=self.result_id,
             comp_id=self.comp_id,
             sender=self.sender,
             context=context,
+            session=session,
         )
 
         print(f"⚙️  Executed: {self.result_name} = {self.func.__name__}(...)")
@@ -1430,6 +1559,11 @@ class ComputationRequest:
                         if local_twin.has_public:
                             return unwrap_for_computation(local_twin.public)
 
+                # Fallback: any Twin with matching id
+                for (tid, _owner), local_twin in _TWIN_REGISTRY.items():
+                    if tid == twin_id and local_twin.has_public:
+                        return unwrap_for_computation(local_twin.public)
+
             # Fall back to received Twin's public
             if arg.has_public:
                 return unwrap_for_computation(arg.public)
@@ -1439,9 +1573,41 @@ class ComputationRequest:
         if context is None:
             context = self._auto_detect_context()
 
+        def resolve_twin_ref(val):
+            """Convert Twin reference dicts back into local Twin instances if available."""
+            if isinstance(val, dict) and val.get("_beaver_twin_ref"):
+                from .twin import _TWIN_REGISTRY, Twin
+
+                twin_id = val["twin_id"]
+                owner_hint = val.get("owner")
+                # Try owner hint
+                if owner_hint and (twin_id, owner_hint) in _TWIN_REGISTRY:
+                    return _TWIN_REGISTRY[(twin_id, owner_hint)]
+                # Try context user
+                if context and (twin_id, context.user) in _TWIN_REGISTRY:
+                    return _TWIN_REGISTRY[(twin_id, context.user)]
+                # Fallback: any twin with matching id
+                for (tid, _owner), twin in _TWIN_REGISTRY.items():
+                    if tid == twin_id:
+                        return twin
+                # Last chance: search context.remote_vars stored values
+                if context and hasattr(context, "remote_vars"):
+                    for var in context.remote_vars.vars.values():
+                        sv = getattr(var, "_stored_value", None)
+                        if isinstance(sv, Twin) and sv.twin_id == twin_id:
+                            _TWIN_REGISTRY[(sv.twin_id, sv.owner)] = sv
+                            return sv
+                raise ValueError(
+                    f"Twin reference '{val.get('name', 'unknown')}' (ID: {twin_id[:12]}...) not available locally"
+                )
+            return val
+
+        resolved_args = tuple(resolve_twin_ref(a) for a in self.args)
+        resolved_kwargs = {k: resolve_twin_ref(v) for k, v in self.kwargs.items()}
+
         # Replace Twin arguments with their public sides (preferring local Twin)
         mock_args = []
-        for arg in self.args:
+        for arg in resolved_args:
             if isinstance(arg, Twin):
                 public_data = get_local_twin_public(arg)
                 if public_data is not None:
@@ -1452,7 +1618,7 @@ class ComputationRequest:
                 mock_args.append(arg)
 
         mock_kwargs = {}
-        for k, v in self.kwargs.items():
+        for k, v in resolved_kwargs.items():
             if isinstance(v, Twin):
                 public_data = get_local_twin_public(v)
                 if public_data is not None:
@@ -1471,6 +1637,7 @@ class ComputationRequest:
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
         captured_figures = []
+        captured_fig_ids = set()  # Track figure IDs to prevent duplicates
 
         # Try to capture matplotlib figures
         try:
@@ -1488,14 +1655,25 @@ class ComputationRequest:
 
             def capturing_show(*_args, **_kwargs):
                 """Capture all current figures when show() is called."""
-                nonlocal captured_figures
+                nonlocal captured_figures, captured_fig_ids
+                print(f"🔍 [capturing_show] Called! Current figs: {plt.get_fignums()}")
                 for fig_num in plt.get_fignums():
                     if fig_num not in existing_figs:
                         fig = plt.figure(fig_num)
+                        fig_id = id(fig)
+                        print(
+                            f"🔍 [capturing_show] Fig {fig_num}: id={fig_id}, already_captured={fig_id in captured_fig_ids}"
+                        )
+                        # Skip if already captured
+                        if fig_id in captured_fig_ids:
+                            print("  ⏭️  Skipping (already captured)")
+                            continue
+                        captured_fig_ids.add(fig_id)
                         buf = io.BytesIO()
                         try:
                             fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                             buf.seek(0)
+                            png_size = len(buf.getvalue())
                             captured_figures.append(
                                 CapturedFigure(
                                     {
@@ -1504,8 +1682,11 @@ class ComputationRequest:
                                     }
                                 )
                             )
-                        except Exception:
-                            pass
+                            print(
+                                f"  ✅ Captured! PNG size: {png_size} bytes, total captured: {len(captured_figures)}"
+                            )
+                        except Exception as e:
+                            print(f"  ❌ Capture failed: {e}")
                 # Don't call original show - we're in Agg backend anyway
 
             plt.show = capturing_show
@@ -1553,16 +1734,24 @@ class ComputationRequest:
 
                 figures_to_capture.update(extract_axes_figures(mock_result))
 
-                # Capture all unique figures
-                captured_fig_ids = set()
+                print(f"🔍 [post-execution] Figures to capture: {len(figures_to_capture)}")
+                print(f"🔍 [post-execution] Already captured IDs: {captured_fig_ids}")
+
+                # Capture all unique figures (reuse captured_fig_ids for deduplication)
                 for fig in figures_to_capture:
-                    if id(fig) in captured_fig_ids:
+                    fig_id = id(fig)
+                    print(
+                        f"🔍 [post-execution] Fig: id={fig_id}, already_captured={fig_id in captured_fig_ids}"
+                    )
+                    if fig_id in captured_fig_ids:
+                        print("  ⏭️  Skipping (already captured)")
                         continue
-                    captured_fig_ids.add(id(fig))
+                    captured_fig_ids.add(fig_id)
                     buf = io.BytesIO()
                     try:
                         fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                         buf.seek(0)
+                        png_size = len(buf.getvalue())
                         captured_figures.append(
                             CapturedFigure(
                                 {
@@ -1570,6 +1759,9 @@ class ComputationRequest:
                                     "png_bytes": buf.getvalue(),
                                 }
                             )
+                        )
+                        print(
+                            f"  ✅ Captured! PNG size: {png_size} bytes, total captured: {len(captured_figures)}"
                         )
                     except Exception:
                         pass
@@ -1581,14 +1773,10 @@ class ComputationRequest:
                 with suppress(Exception):
                     matplotlib.use(original_backend, force=True)
 
-            public_stdout = stdout_capture.getvalue()
-            public_stderr = stderr_capture.getvalue()
             mock_error = None
 
         except Exception as e:
             mock_result = None
-            public_stdout = stdout_capture.getvalue()
-            public_stderr = stderr_capture.getvalue() + f"\n{e}"
             mock_error = str(e)
             if has_matplotlib:
                 # Close any figures that were created before the error
@@ -1598,10 +1786,41 @@ class ComputationRequest:
                 with suppress(Exception):
                     matplotlib.use(original_backend, force=True)
 
-        if mock_error:
-            print(f"⚠️  Mock execution failed: {mock_error}")
-        else:
-            print(f"✓ Mock result: {type(mock_result).__name__}")
+        # Deduplicate captured figures by content (ignore PNG metadata differences)
+        import hashlib
+
+        seen_signatures = set()
+        deduped_figures = []
+
+        def figure_signature(png_bytes: bytes):
+            """Stable signature of figure pixels to catch duplicates with different metadata."""
+            if not png_bytes:
+                return None
+            try:
+                from PIL import Image
+
+                with Image.open(io.BytesIO(png_bytes)) as img:
+                    raw_bytes = img.tobytes()
+                    digest = hashlib.sha256()
+                    digest.update(str(img.size).encode())
+                    digest.update(img.mode.encode())
+                    digest.update(raw_bytes)
+                    return digest.digest()
+            except Exception:
+                return hashlib.sha256(png_bytes).digest()
+
+        for fig in captured_figures:
+            png_bytes = fig.png_bytes if hasattr(fig, "png_bytes") else None
+            signature = figure_signature(png_bytes) if png_bytes else None
+            if signature:
+                if signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+            deduped_figures.append(fig)
+
+        # Capture stdout/stderr after adding debug logs
+        public_stdout = stdout_capture.getvalue()
+        public_stderr = stderr_capture.getvalue()
 
         # Wrap in Twin with only public side
         # Handle None results - use a sentinel dict to allow Twin creation
@@ -1613,21 +1832,23 @@ class ComputationRequest:
             else:
                 # Function returned None legitimately (e.g., plotting function)
                 # Use a sentinel so Twin can be created
-                public_value = {"_none_result": True, "has_figures": len(captured_figures) > 0}
+                public_value = {"_none_result": True, "has_figures": len(deduped_figures) > 0}
 
         result_twin = Twin(
             private=None,
             public=public_value,
             owner=context.user if context else "unknown",
             name=self.result_name,
+            twin_id=self.result_id,
         )
 
         # Attach captured outputs to Twin
         result_twin.public_stdout = public_stdout
         result_twin.public_stderr = public_stderr
-        result_twin.public_figures = captured_figures
+        result_twin.public_figures = deduped_figures
 
-        # Return ComputationResult
+        # Return ComputationResult with session reference if we have one
+        session = getattr(self, "_session", None)
         return ComputationResult(
             result=result_twin,
             stdout=public_stdout,
@@ -1635,9 +1856,11 @@ class ComputationRequest:
             error=mock_error,
             var_name=self.result_name,
             var_id=self.result_id,
+            result_id=self.result_id,
             comp_id=self.comp_id,
             sender=self.sender,
             context=context,
+            session=session,
         )
 
     def run_both(self, context=None):
@@ -1696,6 +1919,11 @@ class ComputationRequest:
                         if local_twin.has_private:
                             return unwrap_for_computation(local_twin.private)
 
+                # Fallback: any Twin with matching id
+                for (tid, _owner), local_twin in _TWIN_REGISTRY.items():
+                    if tid == twin_id and local_twin.has_private:
+                        return unwrap_for_computation(local_twin.private)
+
             # Fall back to received Twin's private
             if arg.has_private:
                 return unwrap_for_computation(arg.private)
@@ -1712,9 +1940,39 @@ class ComputationRequest:
         # Then run on real/private data with clean figure capture
         print("🔒 Step 2/2: Executing on real/private data...")
 
+        def resolve_twin_ref(val):
+            """Convert Twin reference dicts back into local Twin instances if available."""
+            if isinstance(val, dict) and val.get("_beaver_twin_ref"):
+                twin_id = val["twin_id"]
+                owner_hint = val.get("owner")
+
+                if owner_hint and (twin_id, owner_hint) in _TWIN_REGISTRY:
+                    return _TWIN_REGISTRY[(twin_id, owner_hint)]
+                if context and (twin_id, context.user) in _TWIN_REGISTRY:
+                    return _TWIN_REGISTRY[(twin_id, context.user)]
+
+                for (tid, _owner), twin in _TWIN_REGISTRY.items():
+                    if tid == twin_id:
+                        return twin
+
+                if context and hasattr(context, "remote_vars"):
+                    for var in context.remote_vars.vars.values():
+                        sv = getattr(var, "_stored_value", None)
+                        if isinstance(sv, Twin) and sv.twin_id == twin_id:
+                            _TWIN_REGISTRY[(sv.twin_id, sv.owner)] = sv
+                            return sv
+
+                raise ValueError(
+                    f"Twin reference '{val.get('name', 'unknown')}' (ID: {twin_id[:12]}...) not available locally"
+                )
+            return val
+
+        resolved_args = tuple(resolve_twin_ref(a) for a in self.args)
+        resolved_kwargs = {k: resolve_twin_ref(v) for k, v in self.kwargs.items()}
+
         # Build private args (similar to run_mock but using private data)
         private_args = []
-        for arg in self.args:
+        for arg in resolved_args:
             if isinstance(arg, Twin):
                 private_data = get_local_twin_private(arg)
                 if private_data is not None:
@@ -1725,7 +1983,7 @@ class ComputationRequest:
                 private_args.append(arg)
 
         private_kwargs = {}
-        for k, v in self.kwargs.items():
+        for k, v in resolved_kwargs.items():
             if isinstance(v, Twin):
                 private_data = get_local_twin_private(v)
                 if private_data is not None:
@@ -1739,6 +1997,30 @@ class ComputationRequest:
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
         private_figures = []
+        private_fig_ids = set()
+
+        def _capture_private_fig(fig):
+            """Save a matplotlib figure to PNG once per figure id."""
+            nonlocal private_figures, private_fig_ids
+            if fig is None:
+                return
+            if id(fig) in private_fig_ids:
+                return
+            private_fig_ids.add(id(fig))
+            buf = io.BytesIO()
+            try:
+                fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+                buf.seek(0)
+                private_figures.append(
+                    CapturedFigure(
+                        {
+                            "figure": None,
+                            "png_bytes": buf.getvalue(),
+                        }
+                    )
+                )
+            except Exception:
+                pass
 
         try:
             import matplotlib
@@ -1756,23 +2038,9 @@ class ComputationRequest:
 
             def capturing_show(*_args, **_kwargs):
                 """Capture all current figures when show() is called."""
-                nonlocal private_figures
                 for fig_num in plt.get_fignums():
                     fig = plt.figure(fig_num)
-                    buf = io.BytesIO()
-                    try:
-                        fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
-                        buf.seek(0)
-                        private_figures.append(
-                            CapturedFigure(
-                                {
-                                    "figure": None,
-                                    "png_bytes": buf.getvalue(),
-                                }
-                            )
-                        )
-                    except Exception:
-                        pass
+                    _capture_private_fig(fig)
 
             plt.show = capturing_show
 
@@ -1820,25 +2088,8 @@ class ComputationRequest:
                 figures_to_capture.update(extract_axes_figures(private_result))
 
                 # Capture all unique figures
-                captured_fig_ids = set()
                 for fig in figures_to_capture:
-                    if id(fig) in captured_fig_ids:
-                        continue
-                    captured_fig_ids.add(id(fig))
-                    buf = io.BytesIO()
-                    try:
-                        fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
-                        buf.seek(0)
-                        private_figures.append(
-                            CapturedFigure(
-                                {
-                                    "figure": fig,
-                                    "png_bytes": buf.getvalue(),
-                                }
-                            )
-                        )
-                    except Exception:
-                        pass
+                    _capture_private_fig(fig)
                     plt.close(fig)
 
                 plt.close("all")
@@ -1887,6 +2138,7 @@ class ComputationRequest:
             private=private_value,
             owner=context.user if context else "unknown",
             name=self.result_name,
+            twin_id=self.result_id,
         )
 
         # Attach captured outputs to Twin
@@ -1909,7 +2161,13 @@ class ComputationRequest:
         result_twin.private_stderr = private_stderr
         result_twin.private_figures = private_figures
 
-        # Create ComputationResult
+        # Create ComputationResult with session reference if we have one
+        session = getattr(self, "_session", None)
+        if session is None and context is not None:
+            # Fallback to the active session from the executing context if available
+            session = getattr(context, "_active_session", None)
+            if session is not None:
+                self._session = session
         return ComputationResult(
             result=result_twin,
             stdout=private_stdout,
@@ -1920,6 +2178,7 @@ class ComputationRequest:
             comp_id=self.comp_id,
             sender=self.sender,
             context=context,
+            session=session,
         )
 
     def __call__(self, context=None):
@@ -2273,6 +2532,36 @@ def execute_remote_computation(
                 raise ValueError(f"Remote var ID {var_id[:12]}... not found in registry")
             else:
                 raise ValueError("Cannot resolve remote var reference without context")
+
+        # Check if this is a Twin reference dict (from ComputationRequest serialization)
+        if isinstance(arg, dict) and arg.get("_beaver_twin_ref"):
+            from .twin import _TWIN_REGISTRY
+
+            if context:
+                twin_id = arg["twin_id"]
+                owner = arg.get("owner", context.user)
+
+                # Try to find the owner's version of this Twin
+                key = (twin_id, context.user)
+                if key in _TWIN_REGISTRY:
+                    registered_twin = _TWIN_REGISTRY[key]
+                    if registered_twin.has_private:
+                        return registered_twin.private
+
+                # Also check with arg's owner
+                if owner != context.user:
+                    key = (twin_id, owner)
+                    if key in _TWIN_REGISTRY:
+                        registered_twin = _TWIN_REGISTRY[key]
+                        if registered_twin.has_private:
+                            return registered_twin.private
+
+                raise ValueError(
+                    f"Twin reference '{arg.get('name', 'unknown')}' "
+                    f"(ID: {twin_id[:12]}...) not found in registry"
+                )
+            else:
+                raise ValueError("Cannot resolve Twin reference without context")
 
         # Check if this is a Twin - look it up in global Twin registry and unwrap to private data
         from .twin import _TWIN_REGISTRY, Twin

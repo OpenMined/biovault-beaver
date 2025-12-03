@@ -253,36 +253,76 @@ class RemoteVarRegistry:
     Registry of published remote variables for a user.
 
     Manages the catalog of variables that are available for others to load.
+    Can be used standalone or within a session context.
     """
 
-    def __init__(self, owner: str, registry_path: Path):
+    def __init__(
+        self,
+        owner: str,
+        registry_path: Path,
+        session_id: Optional[str] = None,
+        context=None,
+        peer: Optional[str] = None,
+    ):
         """
         Initialize registry.
 
         Args:
             owner: Username who owns these vars
             registry_path: Path to registry JSON file
+            session_id: Optional session ID if within a session
+            context: Optional BeaverContext for encryption support
+            peer: Optional peer email for session-scoped encryption
         """
         self.owner = owner
         self.registry_path = Path(registry_path)
+        self.session_id = session_id
+        self._context = context
+        self.peer = peer  # For session encryption
         self.vars: Dict[str, RemoteVar] = {}
         self._load()
 
     def _load(self):
-        """Load registry from disk."""
+        """Load registry from disk (decrypting if needed)."""
         if self.registry_path.exists():
             try:
-                data = json.loads(self.registry_path.read_text())
+                # Use SyftBox storage to decrypt if available
+                if self._context and hasattr(self._context, "_backend") and self._context._backend:
+                    backend = self._context._backend
+                    if backend.uses_crypto:
+                        raw = bytes(backend.storage.read_with_shadow(str(self.registry_path)))
+                        data = json.loads(raw.decode("utf-8"))
+                    else:
+                        data = json.loads(self.registry_path.read_text())
+                else:
+                    data = json.loads(self.registry_path.read_text())
                 self.vars = {name: RemoteVar.from_dict(var_data) for name, var_data in data.items()}
             except Exception as e:
                 print(f"Warning: Could not load registry from {self.registry_path}: {e}")
                 self.vars = {}
 
     def _save(self):
-        """Save registry to disk."""
+        """Save registry to disk (encrypting if SyftBox backend available)."""
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
         data = {name: var.to_dict() for name, var in self.vars.items()}
-        self.registry_path.write_text(json.dumps(data, indent=2))
+        content = json.dumps(data, indent=2)
+
+        # Use SyftBox storage to encrypt if available
+        if self._context and hasattr(self._context, "_backend") and self._context._backend:
+            backend = self._context._backend
+            if backend.uses_crypto and self.peer:
+                # Encrypt for the peer who will read this registry
+                recipients = [self.peer]
+                backend.storage.write_with_shadow(
+                    str(self.registry_path),
+                    content.encode("utf-8"),
+                    recipients=recipients,
+                    hint="remote-vars-registry",
+                )
+                return
+
+        # Fallback to plaintext
+        self.registry_path.write_text(content)
 
     def add(self, obj: Any, name: Optional[str] = None) -> RemoteVar:
         """
@@ -361,17 +401,69 @@ class RemoteVarRegistry:
             public_data_dir = self.registry_path.parent / "data"
             public_data_dir.mkdir(parents=True, exist_ok=True)
 
+            # Determine backend and recipients for encryption
+            # In SyftBox, data is encrypted FOR THE RECIPIENT (peer) only
+            backend = None
+            recipients = None
+            if self._context and hasattr(self._context, "_backend") and self._context._backend:
+                backend = self._context._backend
+                if backend.uses_crypto and self.peer:
+                    # Encrypt for the peer who will read this data
+                    recipients = [self.peer]
+
             # Pack and write to public directory
             env = pack(
                 public_twin,
                 sender=self.owner,
                 name=name,
                 artifact_dir=public_data_dir,
+                backend=backend,
+                recipients=recipients,
             )
 
             # Write to public data directory: shared/public/{owner}/data/{name}.beaver
-            data_path = write_envelope(env, out_dir=public_data_dir)
-            data_location = str(data_path)
+            # Use encrypted storage if available
+            if self._context and hasattr(self._context, "_backend") and self._context._backend:
+                backend = self._context._backend
+                if backend.uses_crypto:
+                    import base64
+                    import json
+
+                    record = {
+                        "version": env.version,
+                        "envelope_id": env.envelope_id,
+                        "sender": env.sender,
+                        "created_at": env.created_at,
+                        "name": env.name,
+                        "inputs": env.inputs,
+                        "outputs": env.outputs,
+                        "requirements": env.requirements,
+                        "manifest": env.manifest,
+                        "reply_to": env.reply_to,
+                        "payload_b64": base64.b64encode(env.payload).decode("ascii"),
+                    }
+                    content = json.dumps(record, indent=2).encode("utf-8")
+                    data_path = public_data_dir / env.filename()
+                    # Encrypt for the peer who will read this data
+                    if self.peer:
+                        recipients = [self.peer]
+                        backend.storage.write_with_shadow(
+                            str(data_path),
+                            content,
+                            recipients=recipients,
+                            hint="beaver-envelope",
+                        )
+                        data_location = str(data_path)
+                    else:
+                        # No peer, write plaintext
+                        data_path = write_envelope(env, out_dir=public_data_dir)
+                        data_location = str(data_path)
+                else:
+                    data_path = write_envelope(env, out_dir=public_data_dir)
+                    data_location = str(data_path)
+            else:
+                data_path = write_envelope(env, out_dir=public_data_dir)
+                data_location = str(data_path)
 
             stored_value = None  # Don't keep in memory
 
@@ -457,17 +549,58 @@ class RemoteVarRegistry:
             public_twin._live_interval = live_interval
             public_twin._last_sync = getattr(twin, "_last_sync", None)
 
+        # Write to same location (overwrite)
+        public_data_dir = self.registry_path.parent / "data"
+        public_data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Determine backend and recipients for encryption
+        # In SyftBox, data is encrypted FOR THE RECIPIENT (peer) only
+        backend = None
+        recipients = None
+        if self._context and hasattr(self._context, "_backend") and self._context._backend:
+            backend = self._context._backend
+            if backend.uses_crypto and self.peer:
+                # Encrypt for the peer who will read this data
+                recipients = [self.peer]
+
         # Pack and write to public directory
         env = pack(
             public_twin,
             sender=self.owner,
             name=name,
+            artifact_dir=public_data_dir,
+            backend=backend,
+            recipients=recipients,
         )
 
-        # Write to same location (overwrite)
-        public_data_dir = self.registry_path.parent / "data"
-        public_data_dir.mkdir(parents=True, exist_ok=True)
-        data_path = write_envelope(env, out_dir=public_data_dir)
+        # Write envelope (encrypted if backend available)
+        if backend and backend.uses_crypto and recipients:
+            import base64
+            import json
+
+            record = {
+                "version": env.version,
+                "envelope_id": env.envelope_id,
+                "sender": env.sender,
+                "created_at": env.created_at,
+                "name": env.name,
+                "inputs": env.inputs,
+                "outputs": env.outputs,
+                "requirements": env.requirements,
+                "manifest": env.manifest,
+                "reply_to": env.reply_to,
+                "payload_b64": base64.b64encode(env.payload).decode("ascii"),
+            }
+            content = json.dumps(record, indent=2).encode("utf-8")
+            data_path = public_data_dir / env.filename()
+            backend.storage.write_with_shadow(
+                str(data_path),
+                content,
+                recipients=recipients,
+                hint="beaver-envelope",
+            )
+        else:
+            data_path = write_envelope(env, out_dir=public_data_dir)
 
         # Update metadata
         remote_var.data_location = str(data_path)
@@ -638,6 +771,7 @@ class RemoteVarView:
         registry_path: Path,
         data_dir: Path,
         context,
+        session=None,  # Session reference for session-scoped views
     ):
         """
         Initialize remote var view.
@@ -648,20 +782,31 @@ class RemoteVarView:
             registry_path: Path to their registry file
             data_dir: Directory where data is stored
             context: BeaverContext for loading data
+            session: Session reference (if viewing within a session context)
         """
         self.remote_user = remote_user
         self.local_user = local_user
         self.registry_path = Path(registry_path)
         self.data_dir = Path(data_dir)
         self.context = context
+        self.session = session  # Store session reference
         self.vars: Dict[str, RemoteVar] = {}
         self.refresh()
 
     def refresh(self):
-        """Refresh the view by reloading the remote registry."""
+        """Refresh the view by reloading the remote registry (decrypting if needed)."""
         if self.registry_path.exists():
             try:
-                data = json.loads(self.registry_path.read_text())
+                # Use SyftBox storage to decrypt if available
+                if self.context and hasattr(self.context, "_backend") and self.context._backend:
+                    backend = self.context._backend
+                    if backend.uses_crypto:
+                        raw = bytes(backend.storage.read_with_shadow(str(self.registry_path)))
+                        data = json.loads(raw.decode("utf-8"))
+                    else:
+                        data = json.loads(self.registry_path.read_text())
+                else:
+                    data = json.loads(self.registry_path.read_text())
                 self.vars = {name: RemoteVar.from_dict(var_data) for name, var_data in data.items()}
             except Exception as e:
                 print(f"Warning: Could not load remote registry: {e}")
@@ -779,20 +924,24 @@ class RemoteVarPointer:
             try:
                 from .runtime import read_envelope
 
-                data_path = Path(self.remote_var.data_location)
+                # The stored data_location is absolute from owner's perspective
+                # We need to resolve it relative to our local view
+                stored_path = Path(self.remote_var.data_location)
+                filename = stored_path.name
 
-                # Try resolving relative to the registry's data dir if needed
-                if not data_path.exists() and hasattr(self.view, "registry_path"):
-                    candidate = Path(self.view.registry_path).parent / "data" / data_path.name
-                    if candidate.exists():
-                        data_path = candidate
+                # Primary: use our local view's data directory
+                if hasattr(self.view, "data_dir"):
+                    data_path = Path(self.view.data_dir) / filename
+                elif hasattr(self.view, "registry_path"):
+                    data_path = Path(self.view.registry_path).parent / "data" / filename
+                else:
+                    data_path = stored_path
 
-                if not data_path.exists() and hasattr(self.view, "data_dir"):
-                    candidate = Path(self.view.data_dir) / data_path.name
-                    if candidate.exists():
-                        data_path = candidate
+                # Fallback to stored path if local doesn't exist
+                if not data_path.exists() and stored_path.exists():
+                    data_path = stored_path
 
-                # If still missing, try by name in the data directory
+                # Try by name if still not found
                 if not data_path.exists() and hasattr(self.view, "data_dir"):
                     by_name = Path(self.view.data_dir) / f"{self.remote_var.name}.beaver"
                     if by_name.exists():
@@ -814,8 +963,42 @@ class RemoteVarPointer:
                             return None
 
                 if data_path.exists():
-                    env = read_envelope(data_path)
-                    twin = env.load(inject=False, auto_accept=auto_accept)
+                    # Use SyftBox storage to decrypt if available
+                    backend = None
+                    if hasattr(self.view, "context") and self.view.context:
+                        ctx = self.view.context
+                        if hasattr(ctx, "_backend") and ctx._backend:
+                            backend = ctx._backend
+                            if backend.uses_crypto:
+                                # Read and decrypt using shadow pattern
+                                raw = bytes(backend.storage.read_with_shadow(str(data_path)))
+                                import base64
+                                import json
+
+                                from .envelope import BeaverEnvelope
+
+                                record = json.loads(raw.decode("utf-8"))
+                                payload = base64.b64decode(record["payload_b64"])
+                                env = BeaverEnvelope(
+                                    version=record.get("version", 1),
+                                    envelope_id=record.get("envelope_id"),
+                                    sender=record.get("sender", "unknown"),
+                                    created_at=record.get("created_at"),
+                                    name=record.get("name"),
+                                    inputs=record.get("inputs", []),
+                                    outputs=record.get("outputs", []),
+                                    requirements=record.get("requirements", []),
+                                    manifest=record.get("manifest", {}),
+                                    reply_to=record.get("reply_to"),
+                                    payload=payload,
+                                )
+                            else:
+                                env = read_envelope(data_path)
+                        else:
+                            env = read_envelope(data_path)
+                    else:
+                        env = read_envelope(data_path)
+                    twin = env.load(inject=False, auto_accept=auto_accept, backend=backend)
                     if hasattr(twin, "public"):
                         twin.public = _ensure_sparse_shapes(twin.public)
                         # Swap public for a safe display proxy, keep raw on the side
@@ -831,6 +1014,10 @@ class RemoteVarPointer:
                         # Set source path for live sync reloading
                         twin._source_path = str(data_path)
 
+                        # Attach session reference if loading from a session context
+                        if hasattr(self.view, "session") and self.view.session is not None:
+                            twin._session = self.view.session
+
                         # Auto-enable live sync if owner has it enabled
                         if twin.live_enabled and not getattr(twin, "_live_enabled", False):
                             twin.enable_live(interval=twin.live_interval)
@@ -838,7 +1025,17 @@ class RemoteVarPointer:
                         self._loaded_twin = twin
                         return twin
             except Exception as exc:
-                self._last_error = exc
+                # Only set _last_error for permanent errors, not transient sync errors
+                # Transient errors: file not found (sync in progress)
+                # Permanent errors: missing dependencies, decryption failures
+                exc_str = str(exc).lower()
+                is_transient = (
+                    "not found" in exc_str
+                    or "wait for sync" in exc_str
+                    or "may need to wait" in exc_str
+                )
+                if not is_transient:
+                    self._last_error = exc
                 # Fall through to inbox check
                 pass
 
@@ -857,6 +1054,9 @@ class RemoteVarPointer:
                     # Keep looking for even newer ones
 
         if latest_twin is not None:
+            # Attach session reference if loading from a session context
+            if hasattr(self.view, "session") and self.view.session is not None:
+                latest_twin._session = self.view.session
             self._loaded_twin = latest_twin
             return latest_twin
 
@@ -982,23 +1182,32 @@ class RemoteVarPointer:
                                 print(f"✓ Loaded Twin '{var_name}' into globals")
                         return twin
 
-            # Twin not found locally - need to request it
+            # Twin not found locally - need to request it or wait for sync
+            # Check if this is a transient error (sync in progress) vs permanent error
+            last_error = getattr(self, "_last_error", None)
+            is_transient = last_error is None  # No permanent error stored = transient (sync)
+
             if self.remote_var.data_location:
-                if getattr(self, "_last_error", None):
+                if last_error:
                     print(
                         f"⚠️  Twin '{var_name}' published at {self.remote_var.data_location} "
-                        f"but could not be loaded: {self._last_error}"
+                        f"but could not be loaded: {last_error}"
                     )
                     print("💡 Install required dependencies (e.g., anndata/scanpy) and retry.")
                 else:
-                    print(f"📍 Twin '{var_name}' published but not yet loaded.")
-                    print("💡 Ensure published data is accessible and dependencies are installed.")
+                    # Transient - likely waiting for sync, don't print much
+                    pass
             else:
                 print(f"📍 Twin '{var_name}' metadata found, but data not yet sent")
                 print("💡 The owner needs to explicitly .send() this Twin")
                 print(
                     f"💡 Or you can request access with: bv.peer('{self.remote_var.owner}').send_request('{var_name}')"
                 )
+
+            # For transient errors (sync in progress), return None so retry loops continue
+            # For permanent errors, inject pointer and return self
+            if is_transient:
+                return None
 
             if inject:
                 import inspect

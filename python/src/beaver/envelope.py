@@ -50,6 +50,7 @@ class BeaverEnvelope:
         live: bool = True,
         context=None,
         auto_accept: bool = False,
+        backend=None,
     ) -> Any:
         """
         Load the envelope payload and inject into caller's globals.
@@ -63,6 +64,7 @@ class BeaverEnvelope:
             live: If True and object is a live-enabled Twin, auto-subscribe for updates (default: True)
             context: BeaverContext for live subscription (auto-detected if None)
             auto_accept: If True, automatically accept trusted loaders without prompting
+            backend: Optional SyftBoxBackend for reading encrypted artifact files
         """
         import inspect
 
@@ -72,7 +74,20 @@ class BeaverEnvelope:
         if self.manifest.get("required_versions"):
             self._check_and_prompt_missing_imports()
 
-        obj = unpack(self, strict=strict, policy=policy, auto_accept=auto_accept)
+        # Auto-detect backend from context if not provided
+        if (
+            backend is None
+            and context is not None
+            and hasattr(context, "_backend")
+            and context._backend
+        ):
+            backend = context._backend
+
+        obj = unpack(self, strict=strict, policy=policy, auto_accept=auto_accept, backend=backend)
+
+        # Attach session reference if envelope was loaded from a session context
+        if hasattr(self, "_session") and self._session is not None:
+            obj._session = self._session
 
         # Auto-subscribe to live updates if this is a live-enabled Twin
         if live:

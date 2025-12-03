@@ -70,3 +70,4 @@ examples/**/work/*
 examples/**/.nextflow*
 
 sandbox/**
+.venv*/*

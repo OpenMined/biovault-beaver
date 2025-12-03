@@ -13,6 +13,254 @@ from typing import Any, Callable, Optional
 from uuid import uuid4
 
 
+def _detect_function_imports(func: Callable) -> list[str]:
+    """
+    Detect import statements inside a function.
+
+    Returns a list of top-level module names that the function imports.
+    """
+    import textwrap
+
+    try:
+        source = inspect.getsource(func)
+        # Dedent to handle nested functions (preserves relative indentation)
+        source = textwrap.dedent(source)
+        tree = ast.parse(source)
+    except (OSError, TypeError, SyntaxError):
+        return []
+
+    # Find the function definition
+    func_def = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func.__name__:
+            func_def = node
+            break
+
+    if func_def is None:
+        return []
+
+    # Collect imports - get the top-level module name
+    imports = []
+    for node in ast.walk(func_def):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                # Get top-level module (e.g., "matplotlib" from "matplotlib.pyplot")
+                top_module = alias.name.split(".")[0]
+                if top_module not in imports:
+                    imports.append(top_module)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            top_module = node.module.split(".")[0]
+            if top_module not in imports:
+                imports.append(top_module)
+
+    return imports
+
+
+def _detect_function_imports_with_versions(func: Callable) -> dict[str, str | None]:
+    """
+    Detect import statements inside a function and get their installed versions.
+
+    Returns a dict mapping module names to their versions (or None if not installed).
+    """
+    import importlib.metadata
+
+    imports = _detect_function_imports(func)
+    result = {}
+
+    # Map common module names to pip package names for version lookup
+    package_map = {
+        "sklearn": "scikit-learn",
+        "cv2": "opencv-python",
+        "PIL": "pillow",
+        "skimage": "scikit-image",
+    }
+
+    for module_name in imports:
+        pkg_name = package_map.get(module_name, module_name)
+        try:
+            version = importlib.metadata.version(pkg_name)
+            result[module_name] = version
+        except importlib.metadata.PackageNotFoundError:
+            # Try the module name directly
+            try:
+                version = importlib.metadata.version(module_name)
+                result[module_name] = version
+            except importlib.metadata.PackageNotFoundError:
+                result[module_name] = None
+
+    return result
+
+
+def _check_missing_imports(func: Callable) -> list[str]:
+    """
+    Check which imports in a function are not installed.
+
+    Returns list of missing package names.
+    """
+    imports = _detect_function_imports(func)
+    missing = []
+
+    for module_name in imports:
+        # Map common module names to pip package names
+        package_map = {
+            "sklearn": "scikit-learn",
+            "cv2": "opencv-python",
+            "PIL": "pillow",
+            "skimage": "scikit-image",
+        }
+        try:
+            __import__(module_name)
+        except ImportError:
+            pkg_name = package_map.get(module_name, module_name)
+            if pkg_name not in missing:
+                missing.append(pkg_name)
+
+    return missing
+
+
+def _check_missing_imports_with_versions(
+    func: Callable, required_versions: dict[str, str] | None = None
+) -> list[tuple[str, str | None]]:
+    """
+    Check which imports in a function are not installed.
+
+    Args:
+        func: The function to check
+        required_versions: Optional dict of module_name -> version from sender
+
+    Returns list of (package_name, required_version) tuples for missing packages.
+    """
+    imports = _detect_function_imports(func)
+    missing = []
+
+    package_map = {
+        "sklearn": "scikit-learn",
+        "cv2": "opencv-python",
+        "PIL": "pillow",
+        "skimage": "scikit-image",
+    }
+
+    for module_name in imports:
+        try:
+            __import__(module_name)
+        except ImportError:
+            pkg_name = package_map.get(module_name, module_name)
+            version = required_versions.get(module_name) if required_versions else None
+            if not any(p[0] == pkg_name for p in missing):
+                missing.append((pkg_name, version))
+
+    return missing
+
+
+def _is_uv_venv() -> bool:
+    """Check if we're in a uv-managed virtual environment."""
+    import os
+    import shutil
+    import sys
+    from pathlib import Path
+
+    if hasattr(sys, "prefix"):
+        uv_marker = Path(sys.prefix) / "uv.lock"
+        if uv_marker.exists():
+            return True
+        pyvenv_cfg = Path(sys.prefix) / "pyvenv.cfg"
+        if pyvenv_cfg.exists():
+            with suppress(Exception):
+                content = pyvenv_cfg.read_text()
+                if "uv" in content.lower():
+                    return True
+    if os.environ.get("UV_VIRTUAL_ENV"):
+        return True
+    return bool(os.environ.get("VIRTUAL_ENV") and shutil.which("uv"))
+
+
+def _prompt_install_function_deps(
+    missing: list[str] | list[tuple[str, str | None]], func_name: str
+) -> bool:
+    """
+    Prompt user to install missing dependencies for a function.
+
+    Args:
+        missing: Either a list of package names, or list of (package_name, version) tuples
+        func_name: Name of the function requiring these deps
+
+    Returns True if installation succeeded, False otherwise.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    use_uv = _is_uv_venv() and shutil.which("uv")
+    pip_cmd = "uv pip install" if use_uv else "pip install"
+
+    # Normalize to list of (pkg, version) tuples
+    if missing and isinstance(missing[0], str):
+        missing_with_versions: list[tuple[str, str | None]] = [(p, None) for p in missing]
+    else:
+        missing_with_versions = missing  # type: ignore
+
+    # Build install specs with versions where available
+    install_specs = []
+    display_names = []
+    for pkg, version in missing_with_versions:
+        if version:
+            install_specs.append(f"{pkg}=={version}")
+            display_names.append(f"{pkg}=={version}")
+        else:
+            install_specs.append(pkg)
+            display_names.append(pkg)
+
+    deps_str = " ".join(install_specs)
+
+    print(f"\n⚠️  Function '{func_name}' requires packages not installed:")
+    for name in display_names:
+        print(f"   • {name}")
+    print()
+
+    try:
+        response = input(f"Install now with '{pip_cmd} {deps_str}'? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        print("💡 To install manually, run:")
+        print(f"   {pip_cmd} {deps_str}")
+        return False
+
+    if response in ("y", "yes"):
+        print(f"\n📦 Installing {deps_str}...")
+        try:
+            if use_uv:
+                cmd = ["uv", "pip", "install"] + install_specs
+            else:
+                cmd = [sys.executable, "-m", "pip", "install"] + install_specs
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                print(f"✅ Successfully installed: {deps_str}")
+                # Re-import to make packages available
+                for pkg, _ in missing_with_versions:
+                    with suppress(Exception):
+                        __import__(pkg)
+                return True
+            else:
+                print("❌ Installation failed:")
+                print(result.stderr)
+                print("\n💡 To install manually, run:")
+                print(f"   {pip_cmd} {deps_str}")
+                return False
+        except Exception as e:
+            print(f"❌ Installation failed: {e}")
+            print("\n💡 To install manually, run:")
+            print(f"   {pip_cmd} {deps_str}")
+            return False
+    else:
+        print("\n💡 To install manually, run:")
+        print(f"   {pip_cmd} {deps_str}")
+        return False
+
+
 def _detect_global_access(func: Callable) -> list[str]:
     """
     Detect potential global/non-local variable access in a function.
@@ -868,6 +1116,8 @@ class ComputationRequest:
     sender: str
     result_name: str
     created_at: str = field(default_factory=_iso_now)
+    # Required package versions detected from sender's environment
+    required_versions: dict = field(default_factory=dict)
 
     def _auto_detect_context(self):
         """Auto-detect BeaverContext from caller's scope."""
@@ -1622,6 +1872,25 @@ class ComputationRequest:
         """
         from .remote_vars import _ensure_sparse_shapes, _SafeDisplayProxy
         from .twin import _TWIN_REGISTRY, CapturedFigure, Twin
+
+        # Check for missing imports before execution
+        missing = _check_missing_imports_with_versions(self.func, self.required_versions)
+        if missing:
+            func_name = getattr(self.func, "__name__", "computation")
+            if not _prompt_install_function_deps(missing, func_name):
+                # User declined - raise helpful error
+                import shutil
+
+                use_uv = _is_uv_venv() and shutil.which("uv")
+                pip_cmd = "uv pip install" if use_uv else "pip install"
+                specs = [f"{p}=={v}" if v else p for p, v in missing]
+                raise ImportError(
+                    f"\n\n❌ Cannot execute '{func_name}' - missing dependencies\n\n"
+                    f"   Required packages not installed:\n"
+                    + "\n".join(f"   • {s}" for s in specs)
+                    + f"\n\n   To fix, run:\n"
+                    f"   {pip_cmd} {' '.join(specs)}\n"
+                )
 
         def unwrap_for_computation(val):
             """Unwrap display proxies and ensure sparse shapes for computation."""

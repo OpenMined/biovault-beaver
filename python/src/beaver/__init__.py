@@ -8,6 +8,7 @@ from .computation import (
     execute_remote_computation,
 )
 from .envelope import BeaverEnvelope
+from .lib_support import register_builtin_loader
 from .policy import (
     PERMISSIVE_POLICY,
     STRICT_POLICY,
@@ -86,6 +87,7 @@ __all__ = [
     "Session",
     "SessionRequest",
     "SessionRequestsView",
+    "register_builtin_loader",
     "StagingArea",
     "SendResult",
     "SyftBoxBackend",

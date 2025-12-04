@@ -2917,10 +2917,18 @@ def connect(
     if syftbox and data_dir is None and folder is not None:
         syftbox = False
 
+    # Auto-detect data_dir from environment variables
+    if syftbox and data_dir is None:
+        import os
+
+        data_dir = os.environ.get("SYFTBOX_DATA_DIR") or os.environ.get("BIOVAULT_HOME")
+
     if syftbox:
         # SyftBox encrypted mode
         if data_dir is None:
-            raise ValueError("data_dir is required when syftbox=True")
+            raise ValueError(
+                "data_dir is required when syftbox=True (or set SYFTBOX_DATA_DIR env var)"
+            )
 
         # Auto-detect email from SyftBox config if not provided
         effective_user = user

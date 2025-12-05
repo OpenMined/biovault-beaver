@@ -426,7 +426,12 @@ def _prepare_for_sending(
 
         src_lines = inspect.getsource(tl["deserializer"]).splitlines()
         src_clean = "\n".join(
-            line for line in src_lines if not line.lstrip().startswith("@TrustedLoader")
+            line
+            for line in src_lines
+            if not (
+                line.lstrip().startswith("@TrustedLoader")
+                or line.lstrip().startswith("@trusted_loader_cls")
+            )
         )
         src_clean = textwrap.dedent(src_clean)
         return {
@@ -460,7 +465,12 @@ def _prepare_for_sending(
 
             src_lines = inspect.getsource(tl_pub["deserializer"]).splitlines()
             src_clean = "\n".join(
-                line for line in src_lines if not line.lstrip().startswith("@TrustedLoader")
+                line
+                for line in src_lines
+                if not (
+                    line.lstrip().startswith("@TrustedLoader")
+                    or line.lstrip().startswith("@trusted_loader_cls")
+                )
             )
             src_clean = textwrap.dedent(src_clean)
             public_obj = {
@@ -485,7 +495,12 @@ def _prepare_for_sending(
 
                 src_lines = inspect.getsource(tl_priv["deserializer"]).splitlines()
                 src_clean = "\n".join(
-                    line for line in src_lines if not line.lstrip().startswith("@TrustedLoader")
+                    line
+                    for line in src_lines
+                    if not (
+                        line.lstrip().startswith("@TrustedLoader")
+                        or line.lstrip().startswith("@trusted_loader_cls")
+                    )
                 )
                 src_clean = textwrap.dedent(src_clean)
                 private_obj = {
@@ -2078,7 +2093,7 @@ class UserRemoteVars:
             else:
                 # Legacy mode
                 registry_path = self.context._public_dir / self.username / "remote_vars.json"
-                data_dir = self.context._base_dir / self.username
+                data_dir = self.context._public_dir / self.username / "data"
 
             self._remote_vars_view = RemoteVarView(
                 remote_user=self.username,
@@ -2965,15 +2980,41 @@ class BeaverContext:
             print("⚠️  No pending request on this Twin. Call .request_private() first.")
             return None
 
-        print(f"⏳ Waiting for response to '{twin_name}'...")
-
-        # Track already-seen envelopes
-        seen_ids = set()
         candidate_inboxes = self._candidate_inboxes(include_session=include_session)
 
+        def _handle_response(env):
+            """Process a matching response envelope."""
+            print(f"📬 Response received for '{twin_name}'")
+            print(f"   From: {env.sender}")
+
+            # Load the response
+            obj = unpack(env, strict=self.strict, policy=self.policy)
+
+            # Update the twin's private value
+            if hasattr(obj, "private"):
+                twin.private = obj.private
+            else:
+                twin.private = obj
+
+            # Clear pending state
+            twin._pending_comp_id = None
+
+            print(f"✅ '{twin_name}' updated with result")
+            return twin
+
+        # First, check for existing matching response
+        for inbox_path in candidate_inboxes:
+            for env in list_inbox(inbox_path, backend=self._backend):
+                if env.reply_to == comp_id:
+                    return _handle_response(env)
+
+        # No existing match - wait for new ones
+        seen_ids = set()
         for inbox_path in candidate_inboxes:
             for env in list_inbox(inbox_path, backend=self._backend):
                 seen_ids.add(env.envelope_id)
+
+        print(f"⏳ Waiting for response to '{twin_name}'...")
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -2981,30 +3022,10 @@ class BeaverContext:
                 for env in list_inbox(inbox_path, backend=self._backend):
                     if env.envelope_id in seen_ids:
                         continue
+                    seen_ids.add(env.envelope_id)
 
-                    # Check if this is a reply to our request
-                    if env.reply_to != comp_id:
-                        seen_ids.add(env.envelope_id)
-                        continue
-
-                    # Found the response!
-                    print(f"📬 Response received for '{twin_name}'")
-                    print(f"   From: {env.sender}")
-
-                    # Load the response
-                    obj = unpack(env, strict=self.strict, policy=self.policy)
-
-                    # Update the twin's private value
-                    if hasattr(obj, "private"):
-                        twin.private = obj.private
-                    else:
-                        twin.private = obj
-
-                    # Clear pending state
-                    twin._pending_comp_id = None
-
-                    print(f"✅ '{twin_name}' updated with result")
-                    return twin
+                    if env.reply_to == comp_id:
+                        return _handle_response(env)
 
             time.sleep(poll_interval)
 

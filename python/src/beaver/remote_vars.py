@@ -822,6 +822,10 @@ class RemoteVarView:
             view=self,
         )
 
+    def __contains__(self, name: str) -> bool:
+        """Check if a var exists in this view."""
+        return name in self.vars
+
     def __repr__(self) -> str:
         """String representation."""
         if not self.vars:
@@ -922,6 +926,8 @@ class RemoteVarPointer:
         # Try to load from published data location
         if self.remote_var.data_location:
             try:
+                import re
+
                 from .runtime import read_envelope
 
                 # The stored data_location is absolute from owner's perspective
@@ -937,9 +943,25 @@ class RemoteVarPointer:
                 else:
                     data_path = stored_path
 
-                # Fallback to stored path if local doesn't exist
-                if not data_path.exists() and stored_path.exists():
-                    data_path = stored_path
+                # Fallback: translate stored path to our local view
+                # Pattern: sandbox/<owner>/datasites/<datasite>/... -> sandbox/<us>/datasites/<datasite>/...
+                if not data_path.exists():
+                    stored_str = str(stored_path)
+                    # Match sandbox/<identity>/datasites/ pattern
+                    match = re.search(r"/sandbox/([^/]+)/datasites/", stored_str)
+                    if match and hasattr(self.view, "context") and self.view.context:
+                        ctx = self.view.context
+                        if hasattr(ctx, "_backend") and ctx._backend:
+                            # Get our local datasites root
+                            our_datasites = str(ctx._backend.data_dir / "datasites")
+                            # Find where /datasites/ starts in stored path
+                            idx = stored_str.find("/datasites/")
+                            if idx >= 0:
+                                # Take everything after /datasites/ and append to our root
+                                relative = stored_str[idx + len("/datasites/") :]
+                                translated = Path(our_datasites) / relative
+                                if translated.exists():
+                                    data_path = translated
 
                 # Try by name if still not found
                 if not data_path.exists() and hasattr(self.view, "data_dir"):

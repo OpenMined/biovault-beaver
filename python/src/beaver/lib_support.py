@@ -324,14 +324,25 @@ def register_by_type(typ: Type[Any], trusted_loader_cls: Type[Any]) -> bool:
         # Match by module pattern
         matched = False
         if (
-            spec.name == "numpy.ndarray"
-            and type_module.startswith("numpy")
-            and type_name == "ndarray"
-        ) or spec.name == "pandas" and type_module.startswith("pandas") or spec.name == "anndata.AnnData" and type_module.startswith("anndata") or (
-            spec.name == "torch.Tensor"
-            and type_module.startswith("torch")
-            and type_name == "Tensor"
-        ) or spec.name == "pillow.Image" and type_module.startswith("PIL") or spec.name == "matplotlib.Figure" and type_module.startswith("matplotlib.figure"):
+            (
+                spec.name == "numpy.ndarray"
+                and type_module.startswith("numpy")
+                and type_name == "ndarray"
+            )
+            or spec.name == "pandas"
+            and type_module.startswith("pandas")
+            or spec.name == "anndata.AnnData"
+            and type_module.startswith("anndata")
+            or (
+                spec.name == "torch.Tensor"
+                and type_module.startswith("torch")
+                and type_name == "Tensor"
+            )
+            or spec.name == "pillow.Image"
+            and type_module.startswith("PIL")
+            or spec.name == "matplotlib.Figure"
+            and type_module.startswith("matplotlib.figure")
+        ):
             matched = True
 
         if matched:

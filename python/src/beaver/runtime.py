@@ -80,10 +80,21 @@ class TrustedLoader:
         return deco
 
     @classmethod
-    def get(cls, typ: type) -> Optional[Dict[str, Any]]:
+    def get(cls, typ: type, *, auto_register: bool = True) -> Optional[Dict[str, Any]]:
         h = cls._handlers.get(typ)
         if h and h.get("serializer") and h.get("deserializer"):
             return h
+
+        # Auto-register builtin loaders if not found
+        if auto_register and h is None:
+            from . import lib_support
+
+            if lib_support.register_by_type(typ, cls):
+                # Check again after registration
+                h = cls._handlers.get(typ)
+                if h and h.get("serializer") and h.get("deserializer"):
+                    return h
+
         return None
 
 
@@ -429,6 +440,13 @@ def _prepare_for_sending(
     if isinstance(obj, Twin):
         public_obj = obj.public
         private_obj = obj.private if preserve_private else None
+
+        # Register trusted loaders for Twin's public/private content
+        # (the main obj registration above only handles the outer Twin)
+        if public_obj is not None:
+            lib_support.register_builtin_loader(public_obj, TrustedLoader)
+        if private_obj is not None:
+            lib_support.register_builtin_loader(private_obj, TrustedLoader)
 
         # Apply trusted loader to public side if available
         tl_pub = TrustedLoader.get(type(public_obj)) if public_obj is not None else None
@@ -2400,6 +2418,125 @@ class BeaverContext:
 
         print(f"❌ Session rejected: {request.session_id}")
 
+    def active_session(self) -> Optional[Session]:
+        """
+        Get the currently active session, if any.
+
+        Checks for an active session in this order:
+        1. Previously created/accepted session in this context
+        2. BEAVER_SESSION_ID environment variable
+        3. session.json file in current working directory
+
+        Returns:
+            Session object if an active session exists, None otherwise
+
+        Example:
+            bv = beaver.connect()
+            session = bv.active_session()
+            if session:
+                session.send(my_data)
+        """
+        import os
+        from pathlib import Path
+
+        from .session import Session
+
+        # 1. Check if we have an active session from this context
+        if self._active_session and self._active_session.is_active:
+            return self._active_session
+
+        # 2. Check BEAVER_SESSION_ID environment variable
+        session_id = os.environ.get("BEAVER_SESSION_ID")
+
+        # 3. Check session.json in cwd
+        session_json_path = Path(os.getcwd()) / "session.json"
+        session_config = None
+
+        if session_json_path.exists():
+            try:
+                import json
+
+                with open(session_json_path) as f:
+                    session_config = json.load(f)
+                    if not session_id:
+                        session_id = session_config.get("session_id")
+            except Exception as e:
+                print(f"⚠️  Failed to read session.json: {e}")
+
+        if not session_id:
+            return None
+
+        # Try to load session from config or reconstruct from session_id
+        peer = None
+        role = None
+        status = "active"
+
+        if session_config:
+            peer = session_config.get("peer")
+            role = session_config.get("role", "accepter")
+            status = session_config.get("status", "active")
+
+        # If we don't have peer info, try to find it from RPC files
+        if not peer and self._backend:
+            # Check our RPC folder for matching request/response
+            rpc_path = self._backend.get_rpc_session_path()
+            if rpc_path.exists():
+                # Look for request file
+                request_file = rpc_path / f"{session_id}.request"
+                if request_file.exists():
+                    try:
+                        if self._backend.uses_crypto:
+                            data = bytes(self._backend.storage.read_with_shadow(str(request_file)))
+                            req_data = json.loads(data.decode("utf-8"))
+                        else:
+                            req_data = json.loads(request_file.read_text())
+
+                        peer = req_data.get("requester")
+                        role = "accepter"
+                    except Exception:
+                        pass
+
+                # Look for response file (means we sent a request)
+                response_file = rpc_path / f"{session_id}.response"
+                if response_file.exists() and not peer:
+                    try:
+                        if self._backend.uses_crypto:
+                            data = bytes(self._backend.storage.read_with_shadow(str(response_file)))
+                            resp_data = json.loads(data.decode("utf-8"))
+                        else:
+                            resp_data = json.loads(response_file.read_text())
+
+                        peer = resp_data.get("responder")
+                        role = "requester"
+                        status = resp_data.get("status", "active")
+                    except Exception:
+                        pass
+
+        if not peer:
+            print(f"⚠️  Session {session_id} found but peer info missing")
+            return None
+
+        if status != "active" and status != "accepted":
+            print(f"⚠️  Session {session_id} is not active (status: {status})")
+            return None
+
+        # Create and setup the session
+        session = Session(
+            session_id=session_id,
+            peer=peer,
+            owner=self.user,
+            role=role or "accepter",
+            status="active",
+        )
+        session._context = self
+        session._setup_paths()
+        self._active_session = session
+
+        print(f"🟢 Active session loaded: {session_id}")
+        print(f"   Peer: {peer}")
+
+        return session
+
     def start_auto_load(self):
         """Start auto-loading replies in background."""
         if self._auto_load_enabled:
@@ -2687,6 +2824,192 @@ class BeaverContext:
 
         print(f"⏰ Timeout after {timeout}s waiting for message")
         return None, None if auto_load else None
+
+    def wait_for_request(
+        self,
+        twin=None,
+        *,
+        timeout: float = 120.0,
+        poll_interval: float = 2.0,
+        include_session: bool = True,
+    ):
+        """
+        Wait for a computation request, optionally for a specific Twin.
+
+        Args:
+            twin: Twin object or name to wait for requests on (None = any request)
+            timeout: Max seconds to wait (default 120)
+            poll_interval: Seconds between checks (default 2)
+            include_session: Also watch the active session folder (if any)
+
+        Returns:
+            The loaded ComputationRequest object, ready to run
+
+        Example:
+            # Wait for any request
+            request = bv.wait_for_request()
+            result = request.run_both()
+
+            # Wait for request on specific Twin
+            number = Twin(private=1337, public=100, name="number")
+            session.remote_vars["number"] = number
+
+            request = bv.wait_for_request(number)
+            result = request.run_both()
+            result.approve()
+        """
+        # Determine what we're looking for
+        target_name = None
+        if twin is not None:
+            if isinstance(twin, str):
+                target_name = twin
+            elif hasattr(twin, "name") and twin.name:
+                target_name = twin.name
+
+        candidate_inboxes = self._candidate_inboxes(include_session=include_session)
+
+        def _matches_target(env):
+            """Check if envelope matches our target (if any)."""
+            if not env.name or not env.name.startswith("request_"):
+                return False
+            if not target_name:
+                return True
+            # Check env.inputs list (contains input variable names)
+            inputs_match = target_name in (env.inputs or [])
+            # Also check signature in manifest as fallback
+            signature = env.manifest.get("signature", "") if env.manifest else ""
+            signature_match = (
+                f"({target_name})" in signature
+                or f", {target_name})" in signature
+                or f"({target_name}," in signature
+            )
+            return inputs_match or signature_match
+
+        # First, check for existing matching requests (return immediately if found)
+        for inbox_path in candidate_inboxes:
+            for env in list_inbox(inbox_path, backend=self._backend):
+                if _matches_target(env):
+                    print(f"📬 Found existing request: {env.name}")
+                    print(f"   From: {env.sender}")
+                    obj = unpack(env, strict=self.strict, policy=self.policy)
+                    return obj
+
+        # No existing match - now wait for new ones
+        # Track already-seen to avoid re-processing
+        seen_ids = set()
+        for inbox_path in candidate_inboxes:
+            for env in list_inbox(inbox_path, backend=self._backend):
+                seen_ids.add(env.envelope_id)
+
+        if target_name:
+            print(f"⏳ Waiting for request on '{target_name}'...")
+        else:
+            print("⏳ Waiting for any computation request...")
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for inbox_path in candidate_inboxes:
+                for env in list_inbox(inbox_path, backend=self._backend):
+                    # Skip already-seen
+                    if env.envelope_id in seen_ids:
+                        continue
+                    seen_ids.add(env.envelope_id)
+
+                    if _matches_target(env):
+                        print(f"📬 Request received: {env.name}")
+                        print(f"   From: {env.sender}")
+                        obj = unpack(env, strict=self.strict, policy=self.policy)
+                        return obj
+
+            time.sleep(poll_interval)
+
+        print(f"⏰ Timeout after {timeout}s waiting for request")
+        return None
+
+    def wait_for_response(
+        self,
+        twin,
+        *,
+        timeout: float = 120.0,
+        poll_interval: float = 2.0,
+        include_session: bool = True,
+    ):
+        """
+        Wait for a response to a computation request on a Twin.
+
+        Call this after twin.request_private() to wait for the result.
+
+        Args:
+            twin: Twin object that has a pending request
+            timeout: Max seconds to wait (default 120)
+            poll_interval: Seconds between checks (default 2)
+            include_session: Also watch the active session folder (if any)
+
+        Returns:
+            The Twin with updated private value, or None on timeout
+
+        Example:
+            # DS sends request
+            res = analyze(peer_twin)
+            res.request_private()
+
+            # Wait for DO to approve
+            result = bv.wait_for_response(res)
+            print(result.private)  # The approved result!
+        """
+        # Get the pending computation ID
+        comp_id = getattr(twin, "_pending_comp_id", None)
+        twin_name = getattr(twin, "name", None) or "result"
+
+        if comp_id is None:
+            print("⚠️  No pending request on this Twin. Call .request_private() first.")
+            return None
+
+        print(f"⏳ Waiting for response to '{twin_name}'...")
+
+        # Track already-seen envelopes
+        seen_ids = set()
+        candidate_inboxes = self._candidate_inboxes(include_session=include_session)
+
+        for inbox_path in candidate_inboxes:
+            for env in list_inbox(inbox_path, backend=self._backend):
+                seen_ids.add(env.envelope_id)
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for inbox_path in candidate_inboxes:
+                for env in list_inbox(inbox_path, backend=self._backend):
+                    if env.envelope_id in seen_ids:
+                        continue
+
+                    # Check if this is a reply to our request
+                    if env.reply_to != comp_id:
+                        seen_ids.add(env.envelope_id)
+                        continue
+
+                    # Found the response!
+                    print(f"📬 Response received for '{twin_name}'")
+                    print(f"   From: {env.sender}")
+
+                    # Load the response
+                    obj = unpack(env, strict=self.strict, policy=self.policy)
+
+                    # Update the twin's private value
+                    if hasattr(obj, "private"):
+                        twin.private = obj.private
+                    else:
+                        twin.private = obj
+
+                    # Clear pending state
+                    twin._pending_comp_id = None
+
+                    print(f"✅ '{twin_name}' updated with result")
+                    return twin
+
+            time.sleep(poll_interval)
+
+        print(f"⏰ Timeout after {timeout}s waiting for response")
+        return None
 
     def load_by_id(self, envelope_id: str, **kwargs):
         """Load a payload by id using context inbox and inject into caller's globals."""

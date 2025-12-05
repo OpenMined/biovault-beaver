@@ -16,6 +16,7 @@ from .policy import (
     VERBOSE_POLICY,
     BeaverPolicy,
 )
+from .remote_data import get_current_owner
 from .remote_vars import RemoteVar, RemoteVarRegistry, RemoteVarView
 from .runtime import (
     BeaverContext,
@@ -117,6 +118,41 @@ def show_debug() -> None:
     print("\n" + "=" * 60)
 
 
+def dev() -> None:
+    """Reinstall beaver and syftbox-sdk from local dev paths for development.
+
+    Uses BIOVAULT_HOME environment variable to find the packages.
+    Requires kernel restart after running to use new versions.
+    """
+    import os
+    import subprocess
+
+    biovault_home = os.environ.get("BIOVAULT_HOME", "")
+    if not biovault_home:
+        print("BIOVAULT_HOME not set. Cannot find dev packages.")
+        return
+
+    base_repo = os.path.normpath(os.path.join(biovault_home, "..", ".."))
+
+    # Reinstall syftbox-sdk
+    syftbox_path = os.path.join(base_repo, "syftbox-sdk", "python")
+    if os.path.exists(syftbox_path):
+        subprocess.run(["uv", "pip", "install", "-e", syftbox_path, "-q"], check=True)
+        print(f"syftbox-sdk reinstalled from {syftbox_path}")
+    else:
+        print(f"syftbox-sdk not found at {syftbox_path}")
+
+    # Reinstall beaver
+    beaver_path = os.path.join(base_repo, "biovault-beaver", "python")
+    if os.path.exists(beaver_path):
+        subprocess.run(["uv", "pip", "install", "-e", beaver_path, "-q"], check=True)
+        print(f"beaver reinstalled from {beaver_path}")
+    else:
+        print(f"beaver not found at {beaver_path}")
+
+    print("\nRestart kernel to use new versions.")
+
+
 # Enable matplotlib inline mode by default in Jupyter/IPython
 try:
     from IPython import get_ipython
@@ -142,11 +178,112 @@ except ImportError:
     import_peer_bundle = None  # type: ignore
     provision_identity = None  # type: ignore
 
+
+def active_session():
+    """
+    Get the currently active session, if any.
+
+    This is a convenience function that creates a BeaverContext and
+    checks for an active session from:
+    1. BEAVER_SESSION_ID environment variable
+    2. session.json file in current working directory
+
+    Returns:
+        Session object if an active session exists, None otherwise
+
+    Example:
+        import beaver
+        session = beaver.active_session()
+        if session:
+            session.send(my_data)
+    """
+    import os
+    from pathlib import Path
+
+    # Check if there's a session to load
+    session_id = os.environ.get("BEAVER_SESSION_ID")
+    session_json_path = Path(os.getcwd()) / "session.json"
+
+    if not session_id and not session_json_path.exists():
+        return None
+
+    # Create context (will auto-detect data_dir from env)
+    try:
+        ctx = connect()
+        return ctx.active_session()
+    except Exception as e:
+        print(f"⚠️  Failed to load active session: {e}")
+        return None
+
+
+# Cache for the auto-detected context
+_auto_context = None
+
+
+def _get_auto_context():
+    """Get or create an auto-detected BeaverContext."""
+    global _auto_context
+    if _auto_context is None:
+        _auto_context = connect()
+    return _auto_context
+
+
+def ctx():
+    """
+    Get the auto-detected BeaverContext.
+
+    Returns a cached context that auto-detects configuration from
+    environment variables (SYFTBOX_EMAIL, SYFTBOX_DATA_DIR, etc).
+
+    Example:
+        import beaver
+        bv = beaver.ctx()
+
+        @bv
+        def analyze(data):
+            return data.mean()
+    """
+    return _get_auto_context()
+
+
+class _FnDecorator:
+    """
+    Smart decorator that auto-detects context.
+
+    Usage:
+        import beaver
+
+        @beaver.fn
+        def analyze(data):
+            return data.mean()
+
+        # Or with options:
+        @beaver.fn(name="my_analysis")
+        def analyze(data):
+            return data.mean()
+    """
+
+    def __call__(self, func=None, **kwargs):
+        """Use as @beaver.fn or @beaver.fn(options)."""
+        context = _get_auto_context()
+        return context.__call__(func, **kwargs)
+
+    def __repr__(self):
+        return "<beaver.fn decorator - use @beaver.fn to decorate functions>"
+
+
+# Module-level decorator instance
+fn = _FnDecorator()
+
+
 __version__ = "0.1.24"
 __all__ = [
-    "BeaverEnvelope",
+    "active_session",
     "BeaverContext",
+    "BeaverEnvelope",
     "BeaverPolicy",
+    "ctx",
+    "fn",
     "CapturedFigure",
     "ComputationRequest",
     "ComputationResult",
@@ -168,9 +305,11 @@ __all__ = [
     "Twin",
     "TwinComputationResult",
     "connect",
+    "dev",
     "execute_remote_computation",
     "export",
     "find_by_id",
+    "get_current_owner",
     "get_debug",
     "import_peer_bundle",
     "load_by_id",

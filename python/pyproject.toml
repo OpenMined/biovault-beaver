@@ -24,6 +24,7 @@ dependencies = [
     "pyfory",
     "numpy",
     "RestrictedPython",
+    "zstandard>=0.20.0",
 ]
 
 [project.scripts]

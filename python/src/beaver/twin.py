@@ -364,7 +364,7 @@ class Twin(LiveMixin, RemoteData):
     def public_only(
         cls,
         public: Any,
-        owner: str = "unknown",
+        owner: Optional[str] = None,
         live_enabled: bool = False,
         live_interval: float = 2.0,
         **kwargs,
@@ -374,10 +374,12 @@ class Twin(LiveMixin, RemoteData):
 
         Used when receiving a Twin from remote.
         """
+        from .remote_data import get_current_owner
+
         return cls(
             private=None,
             public=public,
-            owner=owner,
+            owner=owner if owner is not None else get_current_owner(),
             live_enabled=live_enabled,
             live_interval=live_interval,
             **kwargs,

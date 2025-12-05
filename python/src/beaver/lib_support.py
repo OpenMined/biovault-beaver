@@ -42,10 +42,11 @@ def _require(module_name: str, *, feature: str):
         ) from exc
 
 
-def _register_numpy(obj: Any, trusted_loader_cls: Type[Any]) -> None:
+def _register_numpy(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any] = None) -> None:
     np = _require("numpy", feature="numpy array serialization")
 
-    obj_type = type(obj)
+    if obj_type is None:
+        obj_type = type(obj)
     name = f"{obj_type.__module__}.{obj_type.__name__}"
 
     @trusted_loader_cls.register(obj_type, name=name)
@@ -70,10 +71,11 @@ def _match_pandas(obj: Any) -> bool:
     return getattr(obj.__class__, "__module__", "").startswith("pandas")
 
 
-def _register_pandas(obj: Any, trusted_loader_cls: Type[Any]) -> None:
+def _register_pandas(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any] = None) -> None:
     pd = _require("pandas", feature="pandas serialization")
 
-    obj_type = type(obj)
+    if obj_type is None:
+        obj_type = type(obj)
     name = f"{obj_type.__module__}.{obj_type.__name__}"
 
     @trusted_loader_cls.register(obj_type, name=name)
@@ -139,12 +141,13 @@ def _match_pillow(obj: Any) -> bool:
     return getattr(obj.__class__, "__module__", "").startswith("PIL.")
 
 
-def _register_pillow(obj: Any, trusted_loader_cls: Type[Any]) -> None:
+def _register_pillow(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any] = None) -> None:
     from PIL import Image  # type: ignore
 
     _require("PIL", feature="Pillow image serialization")
 
-    obj_type = type(obj)
+    if obj_type is None:
+        obj_type = type(obj)
     name = f"{obj_type.__module__}.{obj_type.__name__}"
 
     @trusted_loader_cls.register(obj_type, name=name)
@@ -168,10 +171,13 @@ def _match_matplotlib(obj: Any) -> bool:
     return getattr(obj.__class__, "__module__", "").startswith("matplotlib.figure")
 
 
-def _register_matplotlib(obj: Any, trusted_loader_cls: Type[Any]) -> None:
+def _register_matplotlib(
+    obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any] = None
+) -> None:
     import matplotlib
 
-    obj_type = type(obj)
+    if obj_type is None:
+        obj_type = type(obj)
     name = f"{obj_type.__module__}.{obj_type.__name__}"
 
     @trusted_loader_cls.register(obj_type, name=name)
@@ -202,10 +208,11 @@ def _match_torch(obj: Any) -> bool:
     )
 
 
-def _register_torch(obj: Any, trusted_loader_cls: Type[Any]) -> None:
+def _register_torch(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any] = None) -> None:
     from safetensors.torch import save_file
 
-    obj_type = type(obj)
+    if obj_type is None:
+        obj_type = type(obj)
     name = f"{obj_type.__module__}.{obj_type.__name__}"
 
     @trusted_loader_cls.register(obj_type, name=name)
@@ -253,8 +260,9 @@ def _match_anndata(obj: Any) -> bool:
     return getattr(obj.__class__, "__module__", "").startswith("anndata")
 
 
-def _register_anndata(obj: Any, trusted_loader_cls: Type[Any]) -> None:
-    obj_type = type(obj)
+def _register_anndata(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any] = None) -> None:
+    if obj_type is None:
+        obj_type = type(obj)
     name = f"{obj_type.__module__}.{obj_type.__name__}"
 
     @trusted_loader_cls.register(obj_type, name=name)
@@ -295,4 +303,55 @@ def register_builtin_loader(obj: Any, trusted_loader_cls: Type[Any]) -> None:
         spec.maybe_register(obj, trusted_loader_cls)
 
 
-__all__ = ["register_builtin_loader"]
+def register_by_type(typ: Type[Any], trusted_loader_cls: Type[Any]) -> bool:
+    """
+    Register a TrustedLoader handler by type (without needing an instance).
+
+    Args:
+        typ: The type to register a handler for.
+        trusted_loader_cls: TrustedLoader class used for registration.
+
+    Returns:
+        True if a handler was registered, False otherwise.
+    """
+    type_module = getattr(typ, "__module__", "")
+    type_name = getattr(typ, "__name__", "")
+
+    for spec in _SPECS:
+        if typ in spec.registered_types:
+            return True  # Already registered
+
+        # Match by module pattern
+        matched = False
+        if (
+            (
+                spec.name == "numpy.ndarray"
+                and type_module.startswith("numpy")
+                and type_name == "ndarray"
+            )
+            or spec.name == "pandas"
+            and type_module.startswith("pandas")
+            or spec.name == "anndata.AnnData"
+            and type_module.startswith("anndata")
+            or (
+                spec.name == "torch.Tensor"
+                and type_module.startswith("torch")
+                and type_name == "Tensor"
+            )
+            or spec.name == "pillow.Image"
+            and type_module.startswith("PIL")
+            or spec.name == "matplotlib.Figure"
+            and type_module.startswith("matplotlib.figure")
+        ):
+            matched = True
+
+        if matched:
+            # Call registrar with the type passed explicitly
+            spec.registrar(None, trusted_loader_cls, obj_type=typ)
+            spec.registered_types.add(typ)
+            return True
+
+    return False
+
+
+__all__ = ["register_builtin_loader", "register_by_type"]

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 import tempfile
+import types
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -445,10 +447,38 @@ single_cell = SampleDataset(
     ),
 )
 
+_HELP_TEXT = """beaver.sample_data - Download and use example datasets
+
+List available datasets:
+    sample_data.list_datasets()
+
+Get a dataset:
+    ds = sample_data.single_cell
+    ds = sample_data.get('single_cell')
+
+Download data:
+    ds.mock.download()       # Download mock data only
+    ds.real.download()       # Download real data only
+    ds.download()            # Download both
+
+Create a Twin:
+    twin = ds.twin()         # Downloads & returns Twin(public=mock, private=real)
+
+Inspect a dataset part:
+    ds.mock.info()           # Show manifest details
+
+Cache location: ~/.biovault/cache/beaver/sample-data/
+"""
+
 
 def list_datasets() -> List[str]:
     """List all available sample datasets."""
     return ["single_cell"]
+
+
+def help() -> None:
+    """Print usage help for sample_data module."""
+    print(_HELP_TEXT)
 
 
 def get(name: str) -> SampleDataset:
@@ -466,7 +496,18 @@ __all__ = [
     "single_cell",
     "list_datasets",
     "get",
+    "help",
     "SampleDataset",
     "DatasetPart",
     "DEFAULT_CACHE_DIR",
 ]
+
+
+class _SampleDataModule(types.ModuleType):
+    def __repr__(self) -> str:
+        return _HELP_TEXT
+
+
+_module = _SampleDataModule(__name__)
+_module.__dict__.update(globals())
+sys.modules[__name__] = _module

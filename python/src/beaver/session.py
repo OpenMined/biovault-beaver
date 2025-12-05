@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -208,6 +210,35 @@ class Session:
     _peer_path: Optional[Path] = field(default=None, repr=False)
 
     @property
+    def context(self) -> Optional[BeaverContext]:
+        """
+        Get the BeaverContext for this session.
+
+        Use this to access beaver functionality like the @bv decorator:
+            session = beaver.active_session()
+            bv = session.context
+
+            @bv
+            def my_computation(data):
+                return data.mean()
+        """
+        return self._context
+
+    def ctx(self) -> Optional[BeaverContext]:
+        """
+        Get the BeaverContext for this session.
+
+        Shorthand matching beaver.ctx() pattern:
+            session = beaver.active_session()
+            bv = session.ctx()
+
+            @bv
+            def my_computation(data):
+                return data.mean()
+        """
+        return self._context
+
+    @property
     def local_folder(self) -> Optional[Path]:
         """Path to our local session folder (we write here)."""
         return self._local_path
@@ -221,6 +252,20 @@ class Session:
     def is_active(self) -> bool:
         """Check if session is active."""
         return self.status == "active"
+
+    def open(self) -> None:
+        """Open the local session folder in Finder on macOS."""
+        if sys.platform != "darwin":
+            raise RuntimeError("Session.open() is only supported on macOS.")
+
+        if self._local_path is None:
+            self._setup_paths()
+
+        if self._local_path is None or not self._local_path.exists():
+            raise FileNotFoundError("Session folder is not available to open.")
+
+        # Use macOS `open` to reveal the folder in Finder
+        subprocess.run(["open", str(self._local_path)], check=True)
 
     def wait_for_acceptance(
         self,
@@ -448,6 +493,60 @@ rules:
             context=self._context,
             session=self,  # Pass session reference for write path resolution
         )
+
+    def wait_for_remote_var(
+        self,
+        name: str,
+        *,
+        timeout: float = 120.0,
+        poll_interval: float = 2.0,
+        load: bool = True,
+        auto_accept: bool = False,
+    ):
+        """
+        Wait for a remote variable to be published by the peer.
+
+        Args:
+            name: Name of the remote variable to wait for
+            timeout: Max seconds to wait (default 120)
+            poll_interval: Seconds between checks (default 2)
+            load: If True, load and return the value (default True)
+            auto_accept: If True, automatically accept computation requests (default False)
+
+        Returns:
+            The loaded value if load=True, otherwise the RemoteVarEntry
+
+        Example:
+            # Wait for peer to publish "patient_data"
+            patient = session.wait_for_remote_var("patient_data")
+
+            # With auto_accept for computation results
+            result = session.wait_for_remote_var("result", auto_accept=True)
+        """
+        import time
+
+        if self._context is None:
+            raise RuntimeError("Session not bound to a context.")
+
+        print(f"⏳ Waiting for '{name}' from {self.peer}...")
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                peer_vars = self.peer_remote_vars
+                if name in peer_vars:
+                    print(f"📬 '{name}' is now available!")
+                    if load:
+                        return peer_vars[name].load(auto_accept=auto_accept)
+                    return peer_vars[name]
+            except Exception:
+                # Registry might not exist yet or be unreadable
+                pass
+
+            time.sleep(poll_interval)
+
+        print(f"⏰ Timeout after {timeout}s waiting for '{name}'")
+        return None
 
     def inbox(self):
         """

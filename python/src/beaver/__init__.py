@@ -142,7 +142,7 @@ except ImportError:
     import_peer_bundle = None  # type: ignore
     provision_identity = None  # type: ignore
 
-__version__ = "0.1.23"
+__version__ = "0.1.24"
 __all__ = [
     "BeaverEnvelope",
     "BeaverContext",

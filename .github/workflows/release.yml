@@ -79,7 +79,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd python
-          uv sync --all-extras
+          uv sync --extra dev --extra format
 
       - name: Run tests
         run: |

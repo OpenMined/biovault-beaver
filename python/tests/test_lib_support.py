@@ -259,8 +259,7 @@ def _pillow_image_factory():
 
 
 def _matplotlib_figure_factory():
-    import matplotlib
-
+    matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     plt = pytest.importorskip("matplotlib.pyplot")
     fig, ax = plt.subplots()

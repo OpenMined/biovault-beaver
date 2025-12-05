@@ -1,5 +1,6 @@
 """Lightweight notebook-to-notebook ferry for Python objects using Fory."""
 
+from . import sample_data
 from .computation import (
     ComputationRequest,
     ComputationResult,
@@ -182,4 +183,5 @@ __all__ = [
     "unpack",
     "wait_for_reply",
     "write_envelope",
+    "sample_data",
 ]

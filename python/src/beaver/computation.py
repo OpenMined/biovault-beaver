@@ -1261,6 +1261,22 @@ class ComputationRequest:
 
         def get_local_twin_private(arg):
             """Look up local Twin and get its private data (preferring local over received)."""
+
+            def _get_private_data(twin):
+                """Get private data, auto-loading TrustedLoader if needed."""
+                raw_private = twin._get_raw_private()
+                if raw_private is None:
+                    return None
+                # Check if it's a TrustedLoader that needs resolution
+                if twin._is_trusted_loader(raw_private):
+                    # Auto-load since owner is running the computation (implicit consent)
+                    print(f"🔓 Auto-loading private data for '{twin.name}'...")
+                    loaded = twin.load(which="private", auto_accept=True)
+                    if loaded is None:
+                        return None
+                    return unwrap_for_computation(loaded)
+                return unwrap_for_computation(raw_private)
+
             if context:
                 twin_id = arg.twin_id
                 owner = arg.owner
@@ -1269,25 +1285,30 @@ class ComputationRequest:
                 key = (twin_id, context.user)
                 if key in _TWIN_REGISTRY:
                     local_twin = _TWIN_REGISTRY[key]
-                    if local_twin.has_private:
-                        return unwrap_for_computation(local_twin.private)
+                    private_data = _get_private_data(local_twin)
+                    if private_data is not None:
+                        return private_data
 
                 # Also check with arg's owner
                 if owner != context.user:
                     key = (twin_id, owner)
                     if key in _TWIN_REGISTRY:
                         local_twin = _TWIN_REGISTRY[key]
-                        if local_twin.has_private:
-                            return unwrap_for_computation(local_twin.private)
+                        private_data = _get_private_data(local_twin)
+                        if private_data is not None:
+                            return private_data
 
                 # Fallback: any Twin with matching id
                 for (tid, _owner), local_twin in _TWIN_REGISTRY.items():
-                    if tid == twin_id and local_twin.has_private:
-                        return unwrap_for_computation(local_twin.private)
+                    if tid == twin_id:
+                        private_data = _get_private_data(local_twin)
+                        if private_data is not None:
+                            return private_data
 
             # Fall back to received Twin's private
-            if arg.has_private:
-                return unwrap_for_computation(arg.private)
+            private_data = _get_private_data(arg)
+            if private_data is not None:
+                return private_data
             return None
 
         # Auto-detect context if needed
@@ -1301,6 +1322,8 @@ class ComputationRequest:
 
                 twin_id = val["twin_id"]
                 owner_hint = val.get("owner")
+                dataset_syft_url = val.get("syft_url")
+                dataset_asset = val.get("dataset_asset")
                 if owner_hint and (twin_id, owner_hint) in _TWIN_REGISTRY:
                     return _TWIN_REGISTRY[(twin_id, owner_hint)]
                 if context and (twin_id, context.user) in _TWIN_REGISTRY:
@@ -1317,6 +1340,30 @@ class ComputationRequest:
                             # Register for future lookups
                             _TWIN_REGISTRY[(sv.twin_id, sv.owner)] = sv
                             return sv
+                # Try loading from datasets if available (owner publishes assets)
+                if context and hasattr(context, "datasets"):
+                    try:
+                        # Prefer explicit dataset URL + asset key if provided
+                        twin = None
+                        if dataset_syft_url:
+                            dataset = context.datasets.load_from_url(dataset_syft_url)
+                            if dataset_asset:
+                                twin = dataset[dataset_asset]
+                            else:
+                                twin = dataset.get_asset_by_id(twin_id)
+                        else:
+                            ds_owner = owner_hint or context.user
+                            twin = context.datasets.find_by_twin_id(ds_owner, twin_id)
+                        if twin:
+                            _TWIN_REGISTRY[(twin.twin_id, twin.owner)] = twin
+                            print(
+                                f"📦 Loaded dataset Twin '{twin.name}' "
+                                f"(owner={twin.owner}, id={twin_id[:8]}...)"
+                            )
+                            return twin
+                    except Exception:
+                        # Avoid breaking computation if dataset lookup fails
+                        pass
                 raise ValueError(
                     f"Twin reference '{val.get('name', 'unknown')}' (ID: {twin_id[:12]}...) not available locally"
                 )
@@ -1333,7 +1380,31 @@ class ComputationRequest:
                 if private_data is not None:
                     private_args.append(private_data)
                 else:
-                    raise ValueError("Twin argument has no private data for real execution")
+                    # Give detailed error about why private data isn't available
+                    raw_priv = arg._get_raw_private()
+                    if raw_priv is None:
+                        hint = "Twin has no private slot set."
+                        # Check if there's a mapping that should exist
+                        if hasattr(arg, "syft_url") and arg.syft_url:
+                            hint += f"\n   syft_url: {arg.syft_url}"
+                        if hasattr(arg, "dataset_asset") and arg.dataset_asset:
+                            hint += f"\n   dataset_asset: {arg.dataset_asset}"
+                        hint += "\n   💡 Check that mapping.yaml has an entry for the private URL"
+                    elif arg._is_trusted_loader(raw_priv):
+                        loader_path = raw_priv.get("path", "unknown")
+                        hint = "Twin has TrustedLoader but load failed."
+                        hint += f"\n   Loader path: {loader_path}"
+                        # Check if file exists
+                        from pathlib import Path
+
+                        if not Path(loader_path).exists():
+                            hint += "\n   ❌ File does NOT exist at this path!"
+                            hint += "\n   💡 Check mapping.yaml entry maps to the correct file"
+                    else:
+                        hint = f"Twin private contains unexpected type: {type(raw_priv)}"
+                    raise ValueError(
+                        f"Twin '{arg.name}' (id={arg.twin_id[:8]}...) has no private data.\n   {hint}"
+                    )
             else:
                 private_args.append(arg)
 
@@ -1539,6 +1610,22 @@ class ComputationRequest:
 
         def get_local_twin_public(arg):
             """Look up local Twin and get its public data (preferring local over received)."""
+
+            def _get_public_data(twin):
+                """Get public data, auto-loading TrustedLoader if needed."""
+                raw_public = twin._get_raw_public()
+                if raw_public is None:
+                    return None
+                # Check if it's a TrustedLoader that needs resolution
+                if twin._is_trusted_loader(raw_public):
+                    # Auto-load since this is for mock testing
+                    print(f"🌍 Auto-loading public data for '{twin.name}'...")
+                    loaded = twin.load(which="public", auto_accept=True)
+                    if loaded is None:
+                        return None
+                    return unwrap_for_computation(loaded)
+                return unwrap_for_computation(raw_public)
+
             if context:
                 # Try to find the owner's local version of this Twin
                 twin_id = arg.twin_id
@@ -1548,25 +1635,30 @@ class ComputationRequest:
                 key = (twin_id, context.user)
                 if key in _TWIN_REGISTRY:
                     local_twin = _TWIN_REGISTRY[key]
-                    if local_twin.has_public:
-                        return unwrap_for_computation(local_twin.public)
+                    public_data = _get_public_data(local_twin)
+                    if public_data is not None:
+                        return public_data
 
                 # Also check with arg's owner
                 if owner != context.user:
                     key = (twin_id, owner)
                     if key in _TWIN_REGISTRY:
                         local_twin = _TWIN_REGISTRY[key]
-                        if local_twin.has_public:
-                            return unwrap_for_computation(local_twin.public)
+                        public_data = _get_public_data(local_twin)
+                        if public_data is not None:
+                            return public_data
 
                 # Fallback: any Twin with matching id
                 for (tid, _owner), local_twin in _TWIN_REGISTRY.items():
-                    if tid == twin_id and local_twin.has_public:
-                        return unwrap_for_computation(local_twin.public)
+                    if tid == twin_id:
+                        public_data = _get_public_data(local_twin)
+                        if public_data is not None:
+                            return public_data
 
             # Fall back to received Twin's public
-            if arg.has_public:
-                return unwrap_for_computation(arg.public)
+            public_data = _get_public_data(arg)
+            if public_data is not None:
+                return public_data
             return None
 
         # Auto-detect context if needed
@@ -1580,6 +1672,8 @@ class ComputationRequest:
 
                 twin_id = val["twin_id"]
                 owner_hint = val.get("owner")
+                dataset_syft_url = val.get("syft_url")
+                dataset_asset = val.get("dataset_asset")
                 # Try owner hint
                 if owner_hint and (twin_id, owner_hint) in _TWIN_REGISTRY:
                     return _TWIN_REGISTRY[(twin_id, owner_hint)]
@@ -1597,6 +1691,30 @@ class ComputationRequest:
                         if isinstance(sv, Twin) and sv.twin_id == twin_id:
                             _TWIN_REGISTRY[(sv.twin_id, sv.owner)] = sv
                             return sv
+                # Try loading from datasets if available (owner publishes assets)
+                if context and hasattr(context, "datasets"):
+                    try:
+                        # Prefer explicit dataset URL + asset key if provided
+                        twin = None
+                        if dataset_syft_url:
+                            dataset = context.datasets.load_from_url(dataset_syft_url)
+                            if dataset_asset:
+                                twin = dataset[dataset_asset]
+                            else:
+                                twin = dataset.get_asset_by_id(twin_id)
+                        else:
+                            ds_owner = owner_hint or context.user
+                            twin = context.datasets.find_by_twin_id(ds_owner, twin_id)
+                        if twin:
+                            _TWIN_REGISTRY[(twin.twin_id, twin.owner)] = twin
+                            print(
+                                f"📦 Loaded dataset Twin '{twin.name}' "
+                                f"(owner={twin.owner}, id={twin_id[:8]}...)"
+                            )
+                            return twin
+                    except Exception:
+                        # Avoid breaking computation if dataset lookup fails
+                        pass
                 raise ValueError(
                     f"Twin reference '{val.get('name', 'unknown')}' (ID: {twin_id[:12]}...) not available locally"
                 )

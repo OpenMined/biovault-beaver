@@ -1893,6 +1893,8 @@ def export(
                             "twin_id": val.twin_id,
                             "owner": val.owner,
                             "name": val.name,
+                            "syft_url": getattr(val, "syft_url", None),
+                            "dataset_asset": getattr(val, "dataset_asset", None),
                         }
                     return val
 
@@ -2149,6 +2151,8 @@ class BeaverContext:
             self._public_dir = self._base_dir / "shared" / "public"
             self._registry_path = self._public_dir / self.user / "remote_vars.json"
         self._remote_vars_registry = None
+        self._datasets = None
+        self._mappings = None
 
         # Staging area for remote computations
         self._staging_area = None
@@ -2203,6 +2207,35 @@ class BeaverContext:
                 owner=self.user, registry_path=self._registry_path
             )
         return self._remote_vars_registry
+
+    @property
+    def mappings(self):
+        """
+        Access private-url -> local-path mappings (BIOVAULT_HOME/mapping.yaml).
+        """
+        if self._mappings is None:
+            from .mappings import MappingStore
+
+            self._mappings = MappingStore.from_env(allow_missing=True)
+        return self._mappings
+
+    @property
+    def datasets(self):
+        """
+        Access datasets published to SyftBox datasites.
+
+        Returns:
+            DatasetRegistry for browsing datasets and materializing Twins.
+        """
+        if self._datasets is None:
+            from .datasets import DatasetRegistry
+
+            self._datasets = DatasetRegistry(
+                base_dir=self._base_dir,
+                backend=self._backend,
+                mapping_store=self.mappings,
+            )
+        return self._datasets
 
     def peer(self, username: str):
         """

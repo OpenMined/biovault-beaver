@@ -226,6 +226,10 @@ class Twin(LiveMixin, RemoteData):
     public_stderr: Optional[str] = None
     public_figures: Optional[list] = None  # List of dicts with _beaver_figure keys
 
+    # Optional dataset linkage (for auto-loading Twins from published datasets)
+    syft_url: Optional[str] = None
+    dataset_asset: Optional[str] = None
+
     def __post_init__(self):
         """Initialize Twin and validate."""
         # Initialize LiveMixin
@@ -235,20 +239,25 @@ class Twin(LiveMixin, RemoteData):
         if not hasattr(self, "id") or self.id == uuid4().hex:
             object.__setattr__(self, "id", self.twin_id)
 
+        # Use object.__getattribute__ to avoid triggering our custom __getattribute__
+        raw_private = object.__getattribute__(self, "private")
+        raw_public = object.__getattribute__(self, "public")
+
         # Validate at least one side
-        if self.private is None and self.public is None:
+        if raw_private is None and raw_public is None:
             raise ValueError("Twin must have at least one side (private or public)")
 
         # Set var_type from data
         if self.var_type == "unknown":
-            if self.private is not None:
-                object.__setattr__(self, "var_type", f"Twin[{type(self.private).__name__}]")
-            elif self.public is not None:
-                object.__setattr__(self, "var_type", f"Twin[{type(self.public).__name__}]")
+            if raw_private is not None:
+                object.__setattr__(self, "var_type", f"Twin[{type(raw_private).__name__}]")
+            elif raw_public is not None:
+                object.__setattr__(self, "var_type", f"Twin[{type(raw_public).__name__}]")
 
         # Internal state (not serialized)
         self._value_accessed = False
         self._last_value_print = 0.0
+        self._loading = False  # Prevents recursion during TrustedLoader resolution
 
         # Live sync subscribers (users who are watching this Twin)
         self._live_subscribers: list[str] = []  # List of usernames
@@ -317,6 +326,44 @@ class Twin(LiveMixin, RemoteData):
         else:
             _TWIN_REGISTRY[key] = self
 
+    def __getattribute__(self, name: str):
+        """Intercept access to public/private to auto-resolve TrustedLoader dicts."""
+        # Get the raw value first (avoid infinite recursion)
+        value = object.__getattribute__(self, name)
+
+        # Only intercept public and private attributes
+        if name in ("public", "private"):
+            # Skip if we're in a loading operation (prevents recursion)
+            try:
+                if object.__getattribute__(self, "_loading"):
+                    return value
+            except AttributeError:
+                pass
+
+            # Check if it's a TrustedLoader dict
+            if isinstance(value, dict) and value.get("_trusted_loader") is True:
+                # Set loading flag to prevent recursion
+                object.__setattr__(self, "_loading", True)
+                try:
+                    # Prompt user to load
+                    twin_name = (
+                        object.__getattribute__(self, "name")
+                        or object.__getattribute__(self, "twin_id")[:8]
+                    )
+                    print(f"\n⚠️  Twin '{twin_name}' .{name} has unloaded data.")
+                    print("   Call .load() to load it, or approve now:")
+
+                    # Use the load method to resolve
+                    load_method = object.__getattribute__(self, "load")
+                    load_method(which=name)
+
+                    # Return the now-resolved value
+                    return object.__getattribute__(self, name)
+                finally:
+                    object.__setattr__(self, "_loading", False)
+
+        return value
+
     def __getstate__(self):
         """Control what gets serialized - exclude non-serializable attributes."""
         state = self.__dict__.copy()
@@ -324,6 +371,7 @@ class Twin(LiveMixin, RemoteData):
         non_serializable = [
             "_value_accessed",
             "_last_value_print",  # internal display state
+            "_loading",  # TrustedLoader recursion guard
             "_live_subscribers",
             "_live_context",  # runtime state
             "_source_path",
@@ -356,6 +404,7 @@ class Twin(LiveMixin, RemoteData):
         # Re-initialize runtime attributes
         self._value_accessed = False
         self._last_value_print = 0.0
+        self._loading = False
         self._live_subscribers = []
         self._live_context = None
         self._source_path = None
@@ -404,12 +453,12 @@ class Twin(LiveMixin, RemoteData):
     @property
     def has_private(self) -> bool:
         """Check if private side is available."""
-        return self.private is not None
+        return self._get_raw_private() is not None
 
     @property
     def has_public(self) -> bool:
         """Check if public side is available."""
-        return self.public is not None
+        return self._get_raw_public() is not None
 
     @property
     def private_value(self):
@@ -530,12 +579,180 @@ class Twin(LiveMixin, RemoteData):
             elif which == "private":
                 print("📤 No private output captured")
 
+    def _is_trusted_loader(self, val: Any) -> bool:
+        """Check if a value is an unresolved TrustedLoader dict."""
+        return isinstance(val, dict) and val.get("_trusted_loader") is True
+
+    def _get_raw_public(self):
+        """Get raw public value without triggering __getattribute__ interception."""
+        return object.__getattribute__(self, "public")
+
+    def _get_raw_private(self):
+        """Get raw private value without triggering __getattribute__ interception."""
+        return object.__getattribute__(self, "private")
+
+    def _resolve_trusted_loader(self, loader_dict: dict, auto_accept: bool = False) -> Any:
+        """
+        Resolve a TrustedLoader dict by executing the deserializer.
+
+        Args:
+            loader_dict: Dict with _trusted_loader, path, deserializer_src
+            auto_accept: If True, skip approval prompt
+
+        Returns:
+            The loaded data
+        """
+        name = loader_dict.get("name", "unknown")
+        data_path = loader_dict.get("path")
+        src = loader_dict.get("deserializer_src", "")
+
+        if not data_path or not src:
+            raise ValueError("Invalid TrustedLoader: missing path or deserializer_src")
+
+        if not auto_accept:
+            # ANSI color codes
+            yellow = "\033[33m"
+            cyan = "\033[36m"
+            green = "\033[32m"
+            dim = "\033[2m"
+            reset = "\033[0m"
+
+            lines = []
+            lines.append("")
+            lines.append("━" * 70)
+            lines.append(f"{yellow}⚠️  Code Execution Required{reset}")
+            lines.append("━" * 70)
+            lines.append("")
+            lines.append(f"📦 Loading: {cyan}{name}{reset}")
+            lines.append(f"   From: {dim}{data_path}{reset}")
+            lines.append("")
+            lines.append("📋 Code to execute:")
+            lines.append("")
+
+            # Format the code with line numbers
+            for i, line in enumerate(src.strip().splitlines(), 1):
+                lines.append(f"   {dim}{i:2d}{reset} │ {cyan}{line}{reset}")
+
+            lines.append("")
+            lines.append("━" * 70)
+
+            print("\n".join(lines))
+
+            resp = input(f"\n{green}Execute this code? [y/N]:{reset} ").strip().lower()
+            if resp not in ("y", "yes"):
+                print(f"\n{dim}ℹ️  Load cancelled. Data remains unloaded.{reset}")
+                return None
+
+        # Build scope with common imports
+        scope: dict = {}
+        try:
+            import anndata as ad
+
+            scope["ad"] = ad
+            scope["anndata"] = ad
+        except ImportError:
+            pass
+        try:
+            import pandas as pd
+
+            scope["pd"] = pd
+            scope["pandas"] = pd
+        except ImportError:
+            pass
+        try:
+            import numpy as np
+
+            scope["np"] = np
+            scope["numpy"] = np
+        except ImportError:
+            pass
+
+        # Execute the deserializer source to get the load function
+        exec(src, scope, scope)
+
+        # Find the load function (exclude imported modules)
+        excluded = {
+            scope.get("ad"),
+            scope.get("pd"),
+            scope.get("np"),
+            scope.get("anndata"),
+            scope.get("pandas"),
+            scope.get("numpy"),
+        }
+        load_fn = next((v for v in scope.values() if callable(v) and v not in excluded), None)
+
+        if load_fn is None:
+            raise RuntimeError("No deserializer function found in loader source")
+
+        # Call the load function
+        print("   ✓ Loading data...")
+        result = load_fn(data_path)
+        print(f"   ✓ Loaded: {type(result).__name__}")
+        return result
+
+    def load(self, which: str = "auto", auto_accept: bool = False) -> Any:
+        """
+        Load data from TrustedLoader descriptors.
+
+        If public/private contain TrustedLoader dicts, this method resolves them
+        by executing the deserializer and replaces the dict with actual data.
+
+        Args:
+            which: "auto" (prefer private), "public", "private", or "both"
+            auto_accept: If True, skip approval prompts
+
+        Returns:
+            The loaded value (prefers private if both loaded)
+
+        Example:
+            >>> dataset = bv.datasets["owner"]["name"]
+            >>> adata = dataset.sc_rnaseq.load()  # prompts, loads, returns AnnData
+        """
+        loaded_private = False
+        loaded_public = False
+
+        # Use raw accessors to avoid triggering __getattribute__ interception
+        raw_private = self._get_raw_private()
+        raw_public = self._get_raw_public()
+
+        # Determine what to load
+        load_private = which in ("auto", "private", "both") and self._is_trusted_loader(raw_private)
+        load_public = which in ("auto", "public", "both") and self._is_trusted_loader(raw_public)
+
+        # If auto and private is a loader, load it
+        if load_private:
+            print(f"🔒 Loading PRIVATE data for Twin '{self.name or self.twin_id[:8]}'")
+            resolved = self._resolve_trusted_loader(raw_private, auto_accept=auto_accept)
+            if resolved is not None:
+                object.__setattr__(self, "private", resolved)
+                loaded_private = True
+
+        # If auto and public is a loader (and we didn't load private, or explicitly requested)
+        if load_public and (not loaded_private or which in ("public", "both")):
+            print(f"🌍 Loading PUBLIC data for Twin '{self.name or self.twin_id[:8]}'")
+            resolved = self._resolve_trusted_loader(raw_public, auto_accept=auto_accept)
+            if resolved is not None:
+                object.__setattr__(self, "public", resolved)
+                loaded_public = True
+
+        # Return the preferred value (or None if user cancelled)
+        raw_private = self._get_raw_private()  # Re-fetch after potential update
+        raw_public = self._get_raw_public()
+        if loaded_private or (raw_private is not None and not self._is_trusted_loader(raw_private)):
+            return raw_private
+        elif loaded_public or (raw_public is not None and not self._is_trusted_loader(raw_public)):
+            return raw_public
+        else:
+            # User cancelled or nothing to load - return None quietly
+            return None
+
     @property
     def value(self):
         """
         Get the preferred value.
 
         Prefers private if available (local), else public.
+        If the value is an unresolved TrustedLoader, prompts to load it.
         """
         import time
 
@@ -544,19 +761,30 @@ class Twin(LiveMixin, RemoteData):
             self._value_accessed = False
             self._last_value_print = 0.0
 
+        # Use raw accessors to avoid triggering __getattribute__ interception
+        raw_private = self._get_raw_private()
+        raw_public = self._get_raw_public()
+
+        # Check if we need to resolve TrustedLoader
+        preferred = raw_private if raw_private is not None else raw_public
+        if self._is_trusted_loader(preferred):
+            print(f"\n⚠️  Twin '{self.name or self.twin_id[:8]}' has unloaded data.")
+            print("   Call .load() to load it, or approve now:")
+            return self.load()
+
         # Debounced printing: once per evaluation (1 second debounce)
         current_time = time.time()
         if current_time - self._last_value_print > 1.0:
-            if self.has_private:
+            if raw_private is not None:
                 print(f"🔒 Using PRIVATE data from Twin '{self.name or self.twin_id[:8]}...'")
-            elif self.has_public:
+            elif raw_public is not None:
                 print(f"🌍 Using PUBLIC data from Twin '{self.name or self.twin_id[:8]}...'")
             self._last_value_print = current_time
 
-        if self.has_private:
-            return self.private
-        elif self.has_public:
-            return self.public
+        if raw_private is not None:
+            return raw_private
+        elif raw_public is not None:
+            return raw_public
         else:
             raise ValueError("No data available")
 
@@ -617,7 +845,6 @@ class Twin(LiveMixin, RemoteData):
             name: Override variable name (auto-detected from caller if None)
         """
         import inspect
-        from pathlib import Path
 
         from .computation import ComputationRequest as computation_request_cls  # noqa: N813
         from .runtime import _get_var_name_from_caller, pack, write_envelope
@@ -681,40 +908,32 @@ class Twin(LiveMixin, RemoteData):
             # Determine destination: use session folder if available, otherwise fall back
             backend = getattr(context, "_backend", None)
 
-            if hasattr(self, "_session") and self._session is not None:
-                # Write to our session folder (peer can read it via sync)
-                dest_dir = self._session.local_folder
-                print(f"📤 Writing to session folder: {dest_dir}")
-                # Use backend's write_envelope for encryption if available
-                if backend and backend.uses_crypto:
-                    dest_path = dest_dir / env.filename()
-                    backend.storage.write_with_shadow(
-                        absolute_path=str(dest_path),
-                        data=env_to_bytes(env),
-                        recipients=[self.owner],
-                        hint="computation-request",
-                        overwrite=True,
-                    )
-                    path = dest_path
-                else:
-                    path = write_envelope(env, out_dir=dest_dir)
+            # Get session from Twin or from context's active session
+            session = getattr(self, "_session", None)
+            if session is None:
+                session = getattr(context, "_active_session", None)
+
+            if session is None:
+                print("❌ No active session found.")
+                print("   Computation requests must be sent within a session.")
+                print("   💡 Create or join a session first using the BioVault app.")
+                return
+
+            # Write to our session folder (peer can read it via sync)
+            dest_dir = session.local_folder
+            # Use backend's write_envelope for encryption if available
+            if backend and backend.uses_crypto:
+                dest_path = dest_dir / env.filename()
+                backend.storage.write_with_shadow(
+                    absolute_path=str(dest_path),
+                    data=env_to_bytes(env),
+                    recipients=[self.owner],
+                    hint="computation-request",
+                    overwrite=True,
+                )
+                path = dest_path
             else:
-                # Fallback: send to owner's shared folder (legacy path)
-                dest_dir = Path(context.outbox).parent / self.owner
-                # Use backend for encryption if available
-                if backend and backend.uses_crypto:
-                    dest_dir.mkdir(parents=True, exist_ok=True)
-                    dest_path = dest_dir / env.filename()
-                    backend.storage.write_with_shadow(
-                        absolute_path=str(dest_path),
-                        data=env_to_bytes(env),
-                        recipients=[self.owner],
-                        hint="computation-request",
-                        overwrite=True,
-                    )
-                    path = dest_path
-                else:
-                    path = write_envelope(env, out_dir=dest_dir)
+                path = write_envelope(env, out_dir=dest_dir)
 
             print(f"✓ Sent to {path}")
             print(f"💡 Result will auto-update when {self.owner} approves")
@@ -910,6 +1129,15 @@ class Twin(LiveMixin, RemoteData):
 
     def __str__(self) -> str:
         """String representation showing both sides with visual state indicators."""
+        # Use raw accessors to check for TrustedLoader without triggering resolution
+        raw_private = self._get_raw_private()
+        raw_public = self._get_raw_public()
+
+        # Check if this is a dataset asset Twin with TrustedLoader
+        has_loader = self._is_trusted_loader(raw_private) or self._is_trusted_loader(raw_public)
+        if has_loader:
+            return self._str_trusted_loader(raw_private, raw_public)
+
         lines = []
         twin_name = self.name or f"Twin#{self.twin_id[:8]}"
 
@@ -984,12 +1212,74 @@ class Twin(LiveMixin, RemoteData):
 
         return "\n".join(lines)
 
+    def _str_trusted_loader(self, raw_private, raw_public) -> str:
+        """Format display for Twin with TrustedLoader data (dataset assets)."""
+        # ANSI colors
+        cyan = "\033[36m"
+        green = "\033[32m"
+        dim = "\033[2m"
+        bold = "\033[1m"
+        reset = "\033[0m"
+
+        twin_name = self.name or f"Twin#{self.twin_id[:8]}"
+
+        # Get loader info (prefer private, fall back to public)
+        loader = raw_private if self._is_trusted_loader(raw_private) else raw_public
+        asset_name = loader.get("name", "unknown")
+        data_path = loader.get("path", "unknown")
+        src = loader.get("deserializer_src", "")
+        data_type = loader.get("data_type", "unknown")
+
+        # Determine if private/public are loaders
+        has_private_loader = self._is_trusted_loader(raw_private)
+        has_public_loader = self._is_trusted_loader(raw_public)
+
+        lines = []
+        lines.append(f"{bold}Twin{reset} [{green}DATASET ASSET{reset}] {cyan}{twin_name}{reset}")
+        lines.append(f"  {bold}Owner:{reset} {self.owner}")
+        lines.append(f"  {bold}Asset:{reset} {asset_name}")
+        lines.append(f"  {bold}Type:{reset} {data_type}")
+        lines.append(f"  {bold}Path:{reset} {dim}{data_path}{reset}")
+
+        # Show which slots have loaders
+        if has_private_loader and has_public_loader:
+            lines.append(f"  {bold}Data:{reset} 🔒 Private + 🌍 Public (both unloaded)")
+        elif has_private_loader:
+            lines.append(f"  {bold}Data:{reset} 🔒 Private (unloaded)")
+        elif has_public_loader:
+            lines.append(f"  {bold}Data:{reset} 🌍 Public (unloaded)")
+
+        lines.append(f"  {bold}ID:{reset} {dim}{self.twin_id[:8]}...{reset}")
+
+        # Show the loader source code (internal deserializer)
+        if src:
+            lines.append("")
+            lines.append(f"{bold}Deserializer:{reset} {dim}(runs automatically){reset}")
+            for i, line in enumerate(src.strip().splitlines(), 1):
+                lines.append(f"  {dim}{i:2d}{reset} │ {cyan}{line}{reset}")
+
+        lines.append("")
+        lines.append(
+            f"💡 {cyan}data = asset.load(){reset}  {dim}# returns the loaded object{reset}"
+        )
+
+        return "\n".join(lines)
+
     def __repr__(self) -> str:
         """Use string representation."""
         return self.__str__()
 
     def _repr_html_(self) -> str:
         """HTML representation for Jupyter."""
+        # Use raw accessors to check for TrustedLoader without triggering resolution
+        raw_private = self._get_raw_private()
+        raw_public = self._get_raw_public()
+
+        # Check if this is a dataset asset Twin with TrustedLoader
+        has_loader = self._is_trusted_loader(raw_private) or self._is_trusted_loader(raw_public)
+        if has_loader:
+            return self._repr_html_trusted_loader(raw_private, raw_public)
+
         twin_name = self.name or f"Twin#{self.twin_id[:8]}"
 
         private_html = ""
@@ -1049,5 +1339,70 @@ class Twin(LiveMixin, RemoteData):
                     IDs: twin={self.twin_id[:8]}... private={self.private_id[:8]}... public={self.public_id[:8]}...
                 </td></tr>
             </table>
+        </div>
+        """
+
+    def _repr_html_trusted_loader(self, raw_private, raw_public) -> str:
+        """HTML representation for Twin with TrustedLoader data (dataset assets)."""
+        import html as html_module
+
+        twin_name = self.name or f"Twin#{self.twin_id[:8]}"
+
+        # Get loader info (prefer private, fall back to public)
+        loader = raw_private if self._is_trusted_loader(raw_private) else raw_public
+        asset_name = loader.get("name", "unknown")
+        data_path = loader.get("path", "unknown")
+        src = loader.get("deserializer_src", "")
+        data_type = loader.get("data_type", "unknown")
+
+        # Determine if private/public are loaders
+        has_private_loader = self._is_trusted_loader(raw_private)
+        has_public_loader = self._is_trusted_loader(raw_public)
+
+        if has_private_loader and has_public_loader:
+            data_status = "🔒 Private + 🌍 Public (both unloaded)"
+        elif has_private_loader:
+            data_status = "🔒 Private (unloaded)"
+        else:
+            data_status = "🌍 Public (unloaded)"
+
+        # Format source code with syntax highlighting
+        source_html = ""
+        if src:
+            try:
+                from pygments import highlight
+                from pygments.formatters import HtmlFormatter
+                from pygments.lexers import PythonLexer
+
+                formatter = HtmlFormatter(style="monokai", noclasses=True)
+                highlighted = highlight(src, PythonLexer(), formatter)
+                source_html = f"""
+                <br><br><b>Deserializer:</b> <span style='color: #666; font-size: 11px;'>(runs automatically)</span>
+                <div style='border: 1px solid rgba(128, 128, 128, 0.3);
+                            border-radius: 4px; overflow: hidden; margin-top: 5px;'>{highlighted}</div>
+                """
+            except ImportError:
+                # Fallback if pygments not available
+                escaped_source = html_module.escape(src)
+                source_html = f"""
+                <br><br><b>Deserializer:</b> <span style='color: #666; font-size: 11px;'>(runs automatically)</span>
+                <pre style='background: rgba(128, 128, 128, 0.1);
+                            border: 1px solid rgba(128, 128, 128, 0.3);
+                            padding: 10px; margin-top: 5px; border-radius: 4px;'>{escaped_source}</pre>
+                """
+
+        return f"""
+        <div style='font-family: monospace; border-left: 3px solid #4CAF50; padding-left: 10px;'>
+            <b>Twin</b> <span style='background: #4CAF50; color: white; padding: 2px 6px;
+                                     border-radius: 3px; font-size: 10px;'>DATASET ASSET</span>
+            <code>{html_module.escape(twin_name)}</code><br>
+            <b>Owner:</b> {html_module.escape(self.owner)}<br>
+            <b>Asset:</b> {html_module.escape(asset_name)}<br>
+            <b>Type:</b> {html_module.escape(data_type)}<br>
+            <b>Path:</b> <code style='font-size: 11px;'>{html_module.escape(data_path)}</code><br>
+            <b>Data:</b> {data_status}<br>
+            <b>ID:</b> <code>{self.twin_id[:8]}...</code>
+            {source_html}
+            <br><br><span style='color: #666;'>💡 <code>data = asset.load()</code> <span style='font-size: 11px;'># returns the loaded object</span></span>
         </div>
         """

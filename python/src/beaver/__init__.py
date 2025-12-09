@@ -8,8 +8,10 @@ from .computation import (
     StagingArea,
     execute_remote_computation,
 )
+from .datasets import DatasetRegistry
 from .envelope import BeaverEnvelope
 from .lib_support import register_builtin_loader
+from .mappings import MappingStore
 from .policy import (
     PERMISSIVE_POLICY,
     STRICT_POLICY,
@@ -287,6 +289,8 @@ __all__ = [
     "CapturedFigure",
     "ComputationRequest",
     "ComputationResult",
+    "DatasetRegistry",
+    "MappingStore",
     "PERMISSIVE_POLICY",
     "VERBOSE_POLICY",
     "STRICT_POLICY",

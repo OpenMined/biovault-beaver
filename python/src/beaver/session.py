@@ -712,26 +712,49 @@ rules:
 
     def __repr__(self) -> str:
         status_icon = {"pending": "⏳", "active": "🟢", "closed": "🔴"}.get(self.status, "❓")
-        return (
-            f"{status_icon} Session(\n"
-            f"    id={self.session_id!r},\n"
-            f"    peer={self.peer!r},\n"
-            f"    role={self.role!r},\n"
-            f"    status={self.status!r}\n"
-            f")"
-        )
+        lines = [
+            f"{status_icon} Session with {self.peer}",
+            f"   ID: {self.session_id[:12]}...",
+            f"   Role: {self.role}",
+            f"   Status: {self.status}",
+        ]
+
+        # Include inbox if session is active
+        if self.status == "active" and self._context is not None:
+            try:
+                inbox_view = self.inbox()
+                lines.append("")
+                lines.append("📥 session.inbox():")
+                # Indent inbox output
+                inbox_str = repr(inbox_view)
+                for line in inbox_str.split("\n"):
+                    lines.append(f"   {line}")
+            except Exception:
+                pass  # Don't fail repr if inbox fails
+
+        return "\n".join(lines)
 
     def _repr_html_(self) -> str:
         status_icon = {"pending": "⏳", "active": "🟢", "closed": "🔴"}.get(self.status, "❓")
-        return (
+        html = (
             f"<div style='border:1px solid #ccc; padding:10px; margin:5px; border-radius:5px;'>"
-            f"<b>{status_icon} Session</b><br>"
-            f"<code>ID: {self.session_id}</code><br>"
-            f"Peer: <b>{self.peer}</b><br>"
+            f"<b>{status_icon} Session with {self.peer}</b><br>"
+            f"<code>ID: {self.session_id[:12]}...</code><br>"
             f"Role: {self.role}<br>"
             f"Status: {self.status}"
-            f"</div>"
         )
+
+        # Include inbox if session is active
+        if self.status == "active" and self._context is not None:
+            try:
+                inbox_view = self.inbox()
+                inbox_html = inbox_view._repr_html_()
+                html += f"<br><br><b>📥 session.inbox():</b><br>{inbox_html}"
+            except Exception:
+                pass  # Don't fail repr if inbox fails
+
+        html += "</div>"
+        return html
 
 
 class SessionRequestsView:

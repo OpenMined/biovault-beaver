@@ -643,6 +643,25 @@ class Twin(LiveMixin, RemoteData):
         """Get raw private value without triggering __getattribute__ interception."""
         return object.__getattribute__(self, "private")
 
+    # Built-in lib-support deserializer function names (auto-accept these)
+    _BUILTIN_DESERIALIZERS = frozenset(
+        [
+            "pandas_deserialize_file",
+            "numpy_deserialize_file",
+            "anndata_deserialize_file",
+            "pil_deserialize_file",
+            "safetensors_deserialize_file",
+            "torch_deserialize_file",
+        ]
+    )
+
+    def _is_builtin_deserializer(self, src: str) -> bool:
+        """Check if the deserializer source is a known built-in lib-support function."""
+        if not src:
+            return False
+        first_line = src.strip().split("\n")[0]
+        return any(f"def {name}(" in first_line for name in self._BUILTIN_DESERIALIZERS)
+
     def _resolve_trusted_loader(self, loader_dict: dict, auto_accept: bool = False) -> Any:
         """
         Resolve a TrustedLoader dict by executing the deserializer.
@@ -661,6 +680,10 @@ class Twin(LiveMixin, RemoteData):
 
         if not data_path or not src:
             raise ValueError("Invalid TrustedLoader: missing path or deserializer_src")
+
+        # Auto-accept built-in lib-support deserializers (they're trusted code)
+        if not auto_accept and self._is_builtin_deserializer(src):
+            auto_accept = True
 
         if not auto_accept:
             # ANSI color codes
@@ -989,10 +1012,20 @@ class Twin(LiveMixin, RemoteData):
             if result_name:
                 default_request_name += f"_for_{result_name}"
 
+            # Extract input Twin names from computation args
+            input_names = []
+            for arg in self.private.args:
+                if isinstance(arg, dict) and arg.get("_beaver_remote_var"):
+                    if arg.get("name"):
+                        input_names.append(arg["name"])
+                    elif arg.get("id"):
+                        input_names.append(arg["id"][:12])
+
             env = pack(
                 self.private,
                 sender=context.user,
                 name=default_request_name,
+                inputs=input_names,
             )
 
             # Helper to convert envelope to bytes for encrypted writes

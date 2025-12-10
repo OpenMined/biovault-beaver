@@ -328,7 +328,9 @@ def _sanitize_for_serialization(obj: Any) -> Any:
         if isinstance(obj, np.bool_):
             return bool(obj)
         if isinstance(obj, np.ndarray):
-            return obj.tolist() if obj.size <= 10000 else {"_numpy_array": True, "shape": obj.shape}
+            # Always convert to list - TrustedLoader handles file-based serialization
+            # for top-level numpy arrays, but nested arrays need to be serialized inline
+            return obj.tolist()
     except ImportError:
         pass
 
@@ -2164,7 +2166,7 @@ class BeaverContext:
         strict: bool = False,
         policy=None,
         auto_load_replies: bool = True,
-        poll_interval: float = 2.0,
+        poll_interval: float = 0.5,
         _backend=None,  # SyftBoxBackend instance for encrypted mode
     ) -> None:
         self.inbox_path = Path(inbox)
@@ -2608,8 +2610,11 @@ class BeaverContext:
                         pass
 
         if not peer:
-            print(f"⚠️  Session {session_id} found but peer info missing")
-            return None
+            # Solo session - use self as peer for local testing
+            peer = self.user
+            if not peer:
+                print(f"⚠️  Session {session_id} found but peer info missing")
+                return None
 
         if status != "active" and status != "accepted":
             print(f"⚠️  Session {session_id} is not active (status: {status})")
@@ -2857,6 +2862,7 @@ class BeaverContext:
         filter_name: Optional[str] = None,
         auto_load: bool = True,
         include_session: bool = True,
+        check_existing: bool = True,
     ):
         """
         Wait for a new message to arrive in the inbox.
@@ -2868,6 +2874,7 @@ class BeaverContext:
             filter_name: Only wait for messages with this name
             auto_load: If True, automatically load and return the object
             include_session: Also watch the active session folder (if any)
+            check_existing: If True, first check existing messages (default True)
 
         Returns:
             If auto_load: (envelope, loaded_object)
@@ -2883,37 +2890,55 @@ class BeaverContext:
             # Wait with custom timeout
             env, obj = bv.wait_for_message(timeout=120)
         """
-        # Get current envelope IDs to detect new ones
         candidate_inboxes = self._candidate_inboxes(include_session=include_session)
 
-        current_ids = set()
+        def _matches_filter(env):
+            if filter_sender and env.sender != filter_sender:
+                return False
+            return not (filter_name and env.name != filter_name)
+
+        # First, check existing messages (in case message arrived before we started waiting)
+        if check_existing:
+            for inbox_path in candidate_inboxes:
+                for env in list_inbox(inbox_path, backend=self._backend):
+                    if _matches_filter(env):
+                        print(f"📬 Found existing message: {env.name or env.envelope_id[:12]}")
+                        print(f"   From: {env.sender}")
+                        if auto_load:
+                            obj = unpack(env, strict=self.strict, policy=self.policy)
+                            return env, obj
+                        return env
+
+        # No existing match - wait for new ones
+        seen_ids = set()
         for inbox_path in candidate_inboxes:
-            current_ids.update(
+            seen_ids.update(
                 env.envelope_id for env in list_inbox(inbox_path, backend=self._backend)
             )
 
+        if filter_name:
+            print(f"⏳ Waiting for message with name '{filter_name}'...")
+        elif filter_sender:
+            print(f"⏳ Waiting for message from '{filter_sender}'...")
+        else:
+            print("⏳ Waiting for any message...")
+
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            # Check for new envelopes
             for inbox_path in candidate_inboxes:
                 for env in list_inbox(inbox_path, backend=self._backend):
-                    if env.envelope_id in current_ids:
-                        continue  # Not new
+                    if env.envelope_id in seen_ids:
+                        continue  # Already seen
+                    seen_ids.add(env.envelope_id)
 
-                    # Apply filters
-                    if filter_sender and env.sender != filter_sender:
-                        continue
-                    if filter_name and env.name != filter_name:
-                        continue
+                    if _matches_filter(env):
+                        print(f"📬 New message: {env.name or env.envelope_id[:12]}")
+                        print(f"   From: {env.sender}")
 
-                    # Found a new matching envelope!
-                    print(f"📬 New message: {env.name or env.envelope_id[:12]}")
-                    print(f"   From: {env.sender}")
-
-                    if auto_load:
-                        obj = unpack(env, strict=self.strict, policy=self.policy)
-                        return env, obj
-                    return env
+                        if auto_load:
+                            obj = unpack(env, strict=self.strict, policy=self.policy)
+                            return env, obj
+                        return env
 
             time.sleep(poll_interval)
 
@@ -2925,7 +2950,7 @@ class BeaverContext:
         twin=None,
         *,
         timeout: float = 120.0,
-        poll_interval: float = 2.0,
+        poll_interval: float = 0.5,
         include_session: bool = True,
     ):
         """
@@ -2963,8 +2988,8 @@ class BeaverContext:
 
         candidate_inboxes = self._candidate_inboxes(include_session=include_session)
 
-        def _matches_target(env):
-            """Check if envelope matches our target (if any)."""
+        def _matches_target_fast(env):
+            """Quick check if envelope might match our target (metadata only)."""
             if not env.name or not env.name.startswith("request_"):
                 return False
             if not target_name:
@@ -2980,14 +3005,36 @@ class BeaverContext:
             )
             return inputs_match or signature_match
 
+        def _matches_target_deep(obj):
+            """Deep check if unpacked ComputationRequest matches target by checking args."""
+            if not target_name:
+                return True
+            if hasattr(obj, "args"):
+                for arg in obj.args:
+                    if isinstance(arg, dict) and arg.get("name") == target_name:
+                        return True
+            return False
+
         # First, check for existing matching requests (return immediately if found)
+        # Try fast match first, then deep match for backwards compatibility
         for inbox_path in candidate_inboxes:
             for env in list_inbox(inbox_path, backend=self._backend):
-                if _matches_target(env):
+                if _matches_target_fast(env):
                     print(f"📬 Found existing request: {env.name}")
                     print(f"   From: {env.sender}")
                     obj = unpack(env, strict=self.strict, policy=self.policy)
                     return obj
+
+        # If target specified but no fast match, try deep matching (unpack and check args)
+        if target_name:
+            for inbox_path in candidate_inboxes:
+                for env in list_inbox(inbox_path, backend=self._backend):
+                    if env.name and env.name.startswith("request_"):
+                        obj = unpack(env, strict=self.strict, policy=self.policy)
+                        if _matches_target_deep(obj):
+                            print(f"📬 Found existing request: {env.name}")
+                            print(f"   From: {env.sender}")
+                            return obj
 
         # No existing match - now wait for new ones
         # Track already-seen to avoid re-processing
@@ -3010,11 +3057,20 @@ class BeaverContext:
                         continue
                     seen_ids.add(env.envelope_id)
 
-                    if _matches_target(env):
+                    # Try fast match first
+                    if _matches_target_fast(env):
                         print(f"📬 Request received: {env.name}")
                         print(f"   From: {env.sender}")
                         obj = unpack(env, strict=self.strict, policy=self.policy)
                         return obj
+
+                    # For new requests, also try deep match if target specified
+                    if target_name and env.name and env.name.startswith("request_"):
+                        obj = unpack(env, strict=self.strict, policy=self.policy)
+                        if _matches_target_deep(obj):
+                            print(f"📬 Request received: {env.name}")
+                            print(f"   From: {env.sender}")
+                            return obj
 
             time.sleep(poll_interval)
 
@@ -3026,7 +3082,7 @@ class BeaverContext:
         twin,
         *,
         timeout: float = 120.0,
-        poll_interval: float = 2.0,
+        poll_interval: float = 0.5,
         include_session: bool = True,
     ):
         """
@@ -3095,6 +3151,8 @@ class BeaverContext:
                 seen_ids.add(env.envelope_id)
 
         print(f"⏳ Waiting for response to '{twin_name}'...")
+        print(f"   Looking for reply_to: {comp_id[:12]}...")
+        print(f"   Watching: {[str(p) for p in candidate_inboxes]}")
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -3297,7 +3355,7 @@ def connect(
     strict: bool = False,
     policy=None,
     auto_load_replies: bool = True,
-    poll_interval: float = 2.0,
+    poll_interval: float = 0.5,
     # SyftBox parameters
     syftbox: bool = True,  # Default to SyftBox mode
     data_dir: Optional[Path | str] = None,

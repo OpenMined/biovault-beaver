@@ -307,7 +307,6 @@ class Session:
         if cache_key in self._datasets_cache:
             return self._datasets_cache[cache_key]
 
-
         # Access via context's dataset registry
         dataset = self._context.datasets[owner][name]
         self._datasets_cache[cache_key] = dataset

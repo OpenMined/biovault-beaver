@@ -20,11 +20,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 from uuid import uuid4
 
 if TYPE_CHECKING:
+    from .datasets import Dataset
     from .runtime import BeaverContext
+    from .twin import Twin
 
 
 def _iso_now() -> str:
@@ -189,6 +191,33 @@ class SessionRequest:
 
 
 @dataclass
+class SessionDatasetInfo:
+    """Information about a dataset associated with a session."""
+
+    owner: str
+    name: str
+    public_url: str
+    role: str = "shared"  # 'shared' (using shared data) or 'yours' (your own data)
+
+    def to_dict(self) -> dict:
+        return {
+            "owner": self.owner,
+            "name": self.name,
+            "public_url": self.public_url,
+            "role": self.role,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SessionDatasetInfo":
+        return cls(
+            owner=data.get("owner", ""),
+            name=data.get("name", ""),
+            public_url=data.get("public_url", ""),
+            role=data.get("role", "shared"),
+        )
+
+
+@dataclass
 class Session:
     """
     An active session between a data scientist and data owner.
@@ -203,11 +232,13 @@ class Session:
     created_at: str = field(default_factory=_iso_now)
     accepted_at: Optional[str] = None
     status: str = "pending"  # pending, active, closed
+    datasets: List[SessionDatasetInfo] = field(default_factory=list)  # Associated datasets
 
     # Internal references
     _context: Optional[BeaverContext] = field(default=None, repr=False)
     _local_path: Optional[Path] = field(default=None, repr=False)
     _peer_path: Optional[Path] = field(default=None, repr=False)
+    _datasets_cache: Dict[str, "Dataset"] = field(default_factory=dict, repr=False)
 
     @property
     def context(self) -> Optional[BeaverContext]:
@@ -252,6 +283,95 @@ class Session:
     def is_active(self) -> bool:
         """Check if session is active."""
         return self.status == "active"
+
+    def load_dataset(self, owner: str, name: str) -> "Dataset":
+        """
+        Load a dataset associated with this session.
+
+        Args:
+            owner: Dataset owner email
+            name: Dataset name
+
+        Returns:
+            Dataset object for the specified dataset
+
+        Example:
+            session = beaver.active_session()
+            dataset = session.load_dataset("owner@example.com", "single_cell")
+            twin = dataset["sc_rnaseq"]  # Get a specific asset as Twin
+        """
+        if self._context is None:
+            raise RuntimeError("Session not bound to a context.")
+
+        cache_key = f"{owner}/{name}"
+        if cache_key in self._datasets_cache:
+            return self._datasets_cache[cache_key]
+
+        from .datasets import Dataset as DatasetClass
+
+        # Access via context's dataset registry
+        dataset = self._context.datasets[owner][name]
+        self._datasets_cache[cache_key] = dataset
+        return dataset
+
+    def get_datasets(self) -> Dict[str, "Dataset"]:
+        """
+        Get all datasets associated with this session.
+
+        Returns:
+            Dict mapping "owner/name" to Dataset objects
+
+        Example:
+            session = beaver.active_session()
+            for key, dataset in session.get_datasets().items():
+                print(f"Dataset: {key}")
+                for asset in dataset.assets():
+                    print(f"  - {asset}")
+        """
+        if self._context is None:
+            raise RuntimeError("Session not bound to a context.")
+
+        result = {}
+        for ds_info in self.datasets:
+            key = f"{ds_info.owner}/{ds_info.name}"
+            try:
+                dataset = self.load_dataset(ds_info.owner, ds_info.name)
+                result[key] = dataset
+            except Exception as e:
+                print(f"⚠️  Failed to load dataset {key}: {e}")
+
+        return result
+
+    def get_twins(self) -> Dict[str, "Twin"]:
+        """
+        Get all assets from all associated datasets as Twins.
+
+        Returns:
+            Dict mapping "dataset_name.asset_key" to Twin objects
+
+        Example:
+            session = beaver.active_session()
+            twins = session.get_twins()
+            patient_data = twins["single_cell.sc_rnaseq"]
+        """
+        if self._context is None:
+            raise RuntimeError("Session not bound to a context.")
+
+        result = {}
+        for ds_info in self.datasets:
+            try:
+                dataset = self.load_dataset(ds_info.owner, ds_info.name)
+                for asset_key in dataset.assets():
+                    twin = dataset[asset_key]
+                    result[f"{ds_info.name}.{asset_key}"] = twin
+            except Exception as e:
+                print(f"⚠️  Failed to load dataset {ds_info.owner}/{ds_info.name}: {e}")
+
+        return result
+
+    def has_datasets(self) -> bool:
+        """Check if this session has any associated datasets."""
+        return len(self.datasets) > 0
 
     def open(self) -> None:
         """Open the local session folder in Finder on macOS."""
@@ -691,11 +811,16 @@ rules:
             "created_at": self.created_at,
             "accepted_at": self.accepted_at,
             "status": self.status,
+            "datasets": [ds.to_dict() for ds in self.datasets],
         }
 
     @classmethod
     def from_dict(cls, data: dict, context: Optional[BeaverContext] = None) -> Session:
         """Create from dict."""
+        # Parse datasets list
+        datasets_data = data.get("datasets", [])
+        datasets = [SessionDatasetInfo.from_dict(d) for d in datasets_data]
+
         session = cls(
             session_id=data["session_id"],
             peer=data["peer"],
@@ -704,6 +829,7 @@ rules:
             created_at=data.get("created_at", _iso_now()),
             accepted_at=data.get("accepted_at"),
             status=data.get("status", "pending"),
+            datasets=datasets,
         )
         session._context = context
         if session.status == "active":

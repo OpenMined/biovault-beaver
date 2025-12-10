@@ -25,6 +25,7 @@ dependencies = [
     "numpy",
     "RestrictedPython",
     "zstandard>=0.20.0",
+    "syftbox-sdk",
 ]
 
 [project.scripts]

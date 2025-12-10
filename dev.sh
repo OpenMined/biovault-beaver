@@ -165,6 +165,9 @@ cleanup() {
     fi
   done
 
+  # Also kill any orphaned Jupyter processes in the sandbox
+  pkill -f "jupyter.*$SANDBOX_DIR" 2>/dev/null || true
+
   if (( STACK_STARTED )); then
     (cd "$SYFTBOX_DIR" && GOCACHE="$GO_CACHE_DIR" just sbdev-stop --path "$SANDBOX_DIR") >/dev/null 2>&1 || true
     if (( RESET_FLAG )); then
@@ -207,6 +210,8 @@ start_devstack() {
 
 stop_devstack() {
   echo "Stopping SyftBox devstack at $SANDBOX_DIR..."
+  # Stop any Jupyter processes in the sandbox first
+  pkill -f "jupyter.*$SANDBOX_DIR" 2>/dev/null || true
   if [[ -d "$SYFTBOX_DIR" ]]; then
     (cd "$SYFTBOX_DIR" && GOCACHE="$GO_CACHE_DIR" just sbdev-stop --path "$SANDBOX_DIR") || true
   fi

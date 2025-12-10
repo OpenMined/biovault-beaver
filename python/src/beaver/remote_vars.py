@@ -369,10 +369,12 @@ class RemoteVarRegistry:
 
         if is_twin:
             # For Twin, publish the public side to shared location
-            summary = _summarize(obj.public)
+            # Use object.__getattribute__ to bypass Twin's auto-load hook
+            public_data = object.__getattribute__(obj, "public")
+            summary = _summarize(public_data)
             # Prefer the Twin's own var_type (captures underlying data type)
             var_type = getattr(obj, "var_type", f"Twin[{summary.get('type', 'unknown')}]")
-            deps = _detect_dependencies(obj.public)
+            deps = _detect_dependencies(public_data)
 
             # Write public Twin to shared data directory
             from .runtime import pack, write_envelope
@@ -382,7 +384,7 @@ class RemoteVarRegistry:
             live_interval = obj._live_interval if live_enabled else 2.0
 
             public_twin = Twin.public_only(
-                public=obj.public,
+                public=public_data,
                 owner=self.owner,
                 name=name,
                 twin_id=obj.twin_id,
@@ -532,8 +534,10 @@ class RemoteVarRegistry:
         live_enabled = hasattr(twin, "_live_enabled") and twin._live_enabled
         live_interval = twin._live_interval if live_enabled else 2.0
 
+        # Use object.__getattribute__ to bypass Twin's auto-load hook
+        public_data = object.__getattribute__(twin, "public")
         public_twin = Twin.public_only(
-            public=twin.public,
+            public=public_data,
             owner=self.owner,
             name=name,
             twin_id=twin.twin_id,

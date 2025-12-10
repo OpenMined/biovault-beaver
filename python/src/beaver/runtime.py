@@ -43,6 +43,20 @@ from .envelope import BeaverEnvelope
 if TYPE_CHECKING:
     from .session import Session
 
+# Global context tracker for SyftBox-aware file operations
+_CURRENT_CONTEXT = None
+
+
+def _get_current_context():
+    """Get the current BeaverContext for SyftBox file operations."""
+    return _CURRENT_CONTEXT
+
+
+def _set_current_context(ctx):
+    """Set the current BeaverContext."""
+    global _CURRENT_CONTEXT
+    _CURRENT_CONTEXT = ctx
+
 
 class TrustedLoader:
     """
@@ -314,7 +328,9 @@ def _sanitize_for_serialization(obj: Any) -> Any:
         if isinstance(obj, np.bool_):
             return bool(obj)
         if isinstance(obj, np.ndarray):
-            return obj.tolist() if obj.size <= 10000 else {"_numpy_array": True, "shape": obj.shape}
+            # Always convert to list - TrustedLoader handles file-based serialization
+            # for top-level numpy arrays, but nested arrays need to be serialized inline
+            return obj.tolist()
     except ImportError:
         pass
 
@@ -392,12 +408,17 @@ def _prepare_for_sending(
     from .twin import Twin
 
     def _write_artifact_encrypted(serializer, obj_to_write, path, backend, recipients):
-        """Write artifact using TrustedLoader serializer, optionally encrypting."""
+        """Write artifact using TrustedLoader serializer, optionally encrypting.
+
+        Returns metadata dict if serializer returns one, else None.
+        """
+        meta = None
         if backend and backend.uses_crypto and recipients:
             # Write to temp file first, then encrypt
             temp_path = Path(tempfile.gettempdir()) / f"_beaver_tmp_{uuid4().hex}.bin"
             try:
-                serializer(obj_to_write, temp_path)
+                meta = serializer(obj_to_write, temp_path)
+                # Write the main .bin file
                 data = temp_path.read_bytes()
                 backend.storage.write_with_shadow(
                     absolute_path=str(path),
@@ -411,7 +432,8 @@ def _prepare_for_sending(
                     temp_path.unlink()
         else:
             # Direct write (no encryption)
-            serializer(obj_to_write, path)
+            meta = serializer(obj_to_write, path)
+        return meta
 
     # Trusted loader conversion (non-Twin)
     lib_support.register_builtin_loader(obj, TrustedLoader)
@@ -421,7 +443,7 @@ def _prepare_for_sending(
         target_dir.mkdir(parents=True, exist_ok=True)
         base = name_hint or tl["name"].split(".")[-1] or "artifact"
         path = target_dir / f"{base}.bin"
-        _write_artifact_encrypted(tl["serializer"], obj, path, backend, recipients)
+        meta = _write_artifact_encrypted(tl["serializer"], obj, path, backend, recipients)
         import inspect
 
         src_lines = inspect.getsource(tl["deserializer"]).splitlines()
@@ -434,17 +456,22 @@ def _prepare_for_sending(
             )
         )
         src_clean = textwrap.dedent(src_clean)
-        return {
+        result = {
             "_trusted_loader": True,
             "name": tl["name"],
             "path": str(path),
             "deserializer_src": src_clean,
         }
+        if meta:
+            result["meta"] = meta  # Embed serializer metadata
+        return result
 
     # Handle Twin objects
     if isinstance(obj, Twin):
-        public_obj = obj.public
-        private_obj = obj.private if preserve_private else None
+        # Use object.__getattribute__ to bypass Twin's auto-load hook
+        # This allows passing through TrustedLoader dicts directly for re-serialization
+        public_obj = object.__getattribute__(obj, "public")
+        private_obj = object.__getattribute__(obj, "private") if preserve_private else None
 
         # Register trusted loaders for Twin's public/private content
         # (the main obj registration above only handles the outer Twin)
@@ -460,7 +487,9 @@ def _prepare_for_sending(
             target_dir.mkdir(parents=True, exist_ok=True)
             base = name_hint or getattr(public_obj, "name", None) or "artifact"
             path = target_dir / f"{base}_public.bin"
-            _write_artifact_encrypted(tl_pub["serializer"], public_obj, path, backend, recipients)
+            meta = _write_artifact_encrypted(
+                tl_pub["serializer"], public_obj, path, backend, recipients
+            )
             import inspect
 
             src_lines = inspect.getsource(tl_pub["deserializer"]).splitlines()
@@ -479,6 +508,8 @@ def _prepare_for_sending(
                 "path": str(path),
                 "deserializer_src": src_clean,
             }
+            if meta:
+                public_obj["meta"] = meta
 
         # Apply trusted loader to private side if preserving and available
         if preserve_private and private_obj is not None:
@@ -488,7 +519,7 @@ def _prepare_for_sending(
                 target_dir.mkdir(parents=True, exist_ok=True)
                 base = name_hint or getattr(private_obj, "name", None) or "artifact"
                 path = target_dir / f"{base}_private.bin"
-                _write_artifact_encrypted(
+                meta = _write_artifact_encrypted(
                     tl_priv["serializer"], private_obj, path, backend, recipients
                 )
                 import inspect
@@ -509,6 +540,8 @@ def _prepare_for_sending(
                     "path": str(path),
                     "deserializer_src": src_clean,
                 }
+                if meta:
+                    private_obj["meta"] = meta
 
         # Sanitize values before creating Twin to avoid serialization issues
         # Skip if already a trusted loader dict
@@ -783,6 +816,13 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
             )
         return obj
 
+    # Handle inline parquet bytes (pyfory serializes pandas DataFrames as parquet)
+    if twin_cls is not None and twin_cls._is_inline_parquet_bytes(obj):
+        result = twin_cls._load_inline_parquet(obj)
+        if result is not None:
+            return result
+        # Fall through if deserialization failed
+
     # Unwrap _beaver_figure dicts back to CapturedFigure for nice Jupyter display
     if isinstance(obj, dict) and obj.get("_beaver_figure") and captured_figure_cls is not None:
         return captured_figure_cls(obj)
@@ -811,6 +851,7 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         name = obj.get("name")
         data_path = obj.get("path")
         src = obj.get("deserializer_src", "")
+        meta = obj.get("meta")  # Embedded metadata (e.g., pandas kind/name)
 
         # Translate path from sender's perspective to local view
         # If path contains /datasites/<identity>/, map to our local view
@@ -868,6 +909,11 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
             scope["numpy"] = np
         except ImportError:
             pass
+
+        # Inject metadata if available (eliminates need for .meta.json files)
+        if meta is not None:
+            scope["_beaver_meta"] = meta
+
         exec(src, scope, scope)
         # Exclude TrustedLoader class and imported modules - we want the actual deserializer function
         excluded = {
@@ -2120,7 +2166,7 @@ class BeaverContext:
         strict: bool = False,
         policy=None,
         auto_load_replies: bool = True,
-        poll_interval: float = 2.0,
+        poll_interval: float = 0.5,
         _backend=None,  # SyftBoxBackend instance for encrypted mode
     ) -> None:
         self.inbox_path = Path(inbox)
@@ -2166,6 +2212,9 @@ class BeaverContext:
 
         if auto_load_replies:
             self.start_auto_load()
+
+        # Set as current context for SyftBox-aware file operations
+        _set_current_context(self)
 
     @property
     def settings(self):
@@ -2561,8 +2610,11 @@ class BeaverContext:
                         pass
 
         if not peer:
-            print(f"⚠️  Session {session_id} found but peer info missing")
-            return None
+            # Solo session - use self as peer for local testing
+            peer = self.user
+            if not peer:
+                print(f"⚠️  Session {session_id} found but peer info missing")
+                return None
 
         if status != "active" and status != "accepted":
             print(f"⚠️  Session {session_id} is not active (status: {status})")
@@ -2810,6 +2862,7 @@ class BeaverContext:
         filter_name: Optional[str] = None,
         auto_load: bool = True,
         include_session: bool = True,
+        check_existing: bool = True,
     ):
         """
         Wait for a new message to arrive in the inbox.
@@ -2821,6 +2874,7 @@ class BeaverContext:
             filter_name: Only wait for messages with this name
             auto_load: If True, automatically load and return the object
             include_session: Also watch the active session folder (if any)
+            check_existing: If True, first check existing messages (default True)
 
         Returns:
             If auto_load: (envelope, loaded_object)
@@ -2836,37 +2890,55 @@ class BeaverContext:
             # Wait with custom timeout
             env, obj = bv.wait_for_message(timeout=120)
         """
-        # Get current envelope IDs to detect new ones
         candidate_inboxes = self._candidate_inboxes(include_session=include_session)
 
-        current_ids = set()
+        def _matches_filter(env):
+            if filter_sender and env.sender != filter_sender:
+                return False
+            return not (filter_name and env.name != filter_name)
+
+        # First, check existing messages (in case message arrived before we started waiting)
+        if check_existing:
+            for inbox_path in candidate_inboxes:
+                for env in list_inbox(inbox_path, backend=self._backend):
+                    if _matches_filter(env):
+                        print(f"📬 Found existing message: {env.name or env.envelope_id[:12]}")
+                        print(f"   From: {env.sender}")
+                        if auto_load:
+                            obj = unpack(env, strict=self.strict, policy=self.policy)
+                            return env, obj
+                        return env
+
+        # No existing match - wait for new ones
+        seen_ids = set()
         for inbox_path in candidate_inboxes:
-            current_ids.update(
+            seen_ids.update(
                 env.envelope_id for env in list_inbox(inbox_path, backend=self._backend)
             )
 
+        if filter_name:
+            print(f"⏳ Waiting for message with name '{filter_name}'...")
+        elif filter_sender:
+            print(f"⏳ Waiting for message from '{filter_sender}'...")
+        else:
+            print("⏳ Waiting for any message...")
+
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            # Check for new envelopes
             for inbox_path in candidate_inboxes:
                 for env in list_inbox(inbox_path, backend=self._backend):
-                    if env.envelope_id in current_ids:
-                        continue  # Not new
+                    if env.envelope_id in seen_ids:
+                        continue  # Already seen
+                    seen_ids.add(env.envelope_id)
 
-                    # Apply filters
-                    if filter_sender and env.sender != filter_sender:
-                        continue
-                    if filter_name and env.name != filter_name:
-                        continue
+                    if _matches_filter(env):
+                        print(f"📬 New message: {env.name or env.envelope_id[:12]}")
+                        print(f"   From: {env.sender}")
 
-                    # Found a new matching envelope!
-                    print(f"📬 New message: {env.name or env.envelope_id[:12]}")
-                    print(f"   From: {env.sender}")
-
-                    if auto_load:
-                        obj = unpack(env, strict=self.strict, policy=self.policy)
-                        return env, obj
-                    return env
+                        if auto_load:
+                            obj = unpack(env, strict=self.strict, policy=self.policy)
+                            return env, obj
+                        return env
 
             time.sleep(poll_interval)
 
@@ -2878,7 +2950,7 @@ class BeaverContext:
         twin=None,
         *,
         timeout: float = 120.0,
-        poll_interval: float = 2.0,
+        poll_interval: float = 0.5,
         include_session: bool = True,
     ):
         """
@@ -2916,8 +2988,8 @@ class BeaverContext:
 
         candidate_inboxes = self._candidate_inboxes(include_session=include_session)
 
-        def _matches_target(env):
-            """Check if envelope matches our target (if any)."""
+        def _matches_target_fast(env):
+            """Quick check if envelope might match our target (metadata only)."""
             if not env.name or not env.name.startswith("request_"):
                 return False
             if not target_name:
@@ -2933,14 +3005,36 @@ class BeaverContext:
             )
             return inputs_match or signature_match
 
+        def _matches_target_deep(obj):
+            """Deep check if unpacked ComputationRequest matches target by checking args."""
+            if not target_name:
+                return True
+            if hasattr(obj, "args"):
+                for arg in obj.args:
+                    if isinstance(arg, dict) and arg.get("name") == target_name:
+                        return True
+            return False
+
         # First, check for existing matching requests (return immediately if found)
+        # Try fast match first, then deep match for backwards compatibility
         for inbox_path in candidate_inboxes:
             for env in list_inbox(inbox_path, backend=self._backend):
-                if _matches_target(env):
+                if _matches_target_fast(env):
                     print(f"📬 Found existing request: {env.name}")
                     print(f"   From: {env.sender}")
                     obj = unpack(env, strict=self.strict, policy=self.policy)
                     return obj
+
+        # If target specified but no fast match, try deep matching (unpack and check args)
+        if target_name:
+            for inbox_path in candidate_inboxes:
+                for env in list_inbox(inbox_path, backend=self._backend):
+                    if env.name and env.name.startswith("request_"):
+                        obj = unpack(env, strict=self.strict, policy=self.policy)
+                        if _matches_target_deep(obj):
+                            print(f"📬 Found existing request: {env.name}")
+                            print(f"   From: {env.sender}")
+                            return obj
 
         # No existing match - now wait for new ones
         # Track already-seen to avoid re-processing
@@ -2963,11 +3057,20 @@ class BeaverContext:
                         continue
                     seen_ids.add(env.envelope_id)
 
-                    if _matches_target(env):
+                    # Try fast match first
+                    if _matches_target_fast(env):
                         print(f"📬 Request received: {env.name}")
                         print(f"   From: {env.sender}")
                         obj = unpack(env, strict=self.strict, policy=self.policy)
                         return obj
+
+                    # For new requests, also try deep match if target specified
+                    if target_name and env.name and env.name.startswith("request_"):
+                        obj = unpack(env, strict=self.strict, policy=self.policy)
+                        if _matches_target_deep(obj):
+                            print(f"📬 Request received: {env.name}")
+                            print(f"   From: {env.sender}")
+                            return obj
 
             time.sleep(poll_interval)
 
@@ -2979,7 +3082,7 @@ class BeaverContext:
         twin,
         *,
         timeout: float = 120.0,
-        poll_interval: float = 2.0,
+        poll_interval: float = 0.5,
         include_session: bool = True,
     ):
         """
@@ -3048,6 +3151,8 @@ class BeaverContext:
                 seen_ids.add(env.envelope_id)
 
         print(f"⏳ Waiting for response to '{twin_name}'...")
+        print(f"   Looking for reply_to: {comp_id[:12]}...")
+        print(f"   Watching: {[str(p) for p in candidate_inboxes]}")
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -3250,7 +3355,7 @@ def connect(
     strict: bool = False,
     policy=None,
     auto_load_replies: bool = True,
-    poll_interval: float = 2.0,
+    poll_interval: float = 0.5,
     # SyftBox parameters
     syftbox: bool = True,  # Default to SyftBox mode
     data_dir: Optional[Path | str] = None,

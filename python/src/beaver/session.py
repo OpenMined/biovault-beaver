@@ -385,6 +385,100 @@ class Session:
         # Use macOS `open` to reveal the folder in Finder
         subprocess.run(["open", str(self._local_path)], check=True)
 
+    def reset(self, *, force: bool = False) -> int:
+        """
+        Reset the session by deleting all files except syft.pub.yaml.
+
+        Useful for testing when you want to start fresh without recreating
+        the session.
+
+        Args:
+            force: Must be True to actually delete files (safety check)
+
+        Returns:
+            Number of files deleted
+
+        Example:
+            session.reset(force=True)  # Delete all beaver files
+        """
+        if not force:
+            print("⚠️  session.reset() requires force=True to delete files")
+            print("   This will delete all .beaver files, remote_vars.json, and data/ folder")
+            print("   The syft.pub.yaml will be preserved")
+            return 0
+
+        if self._local_path is None:
+            self._setup_paths()
+
+        if self._local_path is None or not self._local_path.exists():
+            print("Session folder doesn't exist")
+            return 0
+
+        import shutil
+
+        deleted = 0
+        preserve = {"syft.pub.yaml"}
+
+        # Delete files in session folder (local outbox)
+        for item in self._local_path.iterdir():
+            if item.name in preserve:
+                continue
+
+            try:
+                if item.is_file():
+                    item.unlink()
+                    deleted += 1
+                    print(f"  Deleted: {item.name}")
+                elif item.is_dir():
+                    count = sum(1 for _ in item.rglob("*") if _.is_file())
+                    shutil.rmtree(item)
+                    deleted += count
+                    print(f"  Deleted: {item.name}/ ({count} files)")
+            except Exception as e:
+                print(f"  Failed to delete {item.name}: {e}")
+
+        # Also delete files in inbox (unencrypted peer folder) - incoming requests
+        # The inbox is in unencrypted/<peer>/shared/biovault/sessions/<id>/
+        if self._context and hasattr(self._context, "_backend"):
+            backend = self._context._backend
+            inbox_path = (
+                backend.data_dir
+                / "unencrypted"
+                / self.peer
+                / "shared"
+                / "biovault"
+                / "sessions"
+                / self.session_id
+            )
+            if inbox_path.exists():
+                inbox_deleted = 0
+                for item in inbox_path.iterdir():
+                    if item.name in preserve:
+                        continue
+                    try:
+                        if item.is_file():
+                            item.unlink()
+                            inbox_deleted += 1
+                        elif item.is_dir():
+                            count = sum(1 for _ in item.rglob("*") if _.is_file())
+                            shutil.rmtree(item)
+                            inbox_deleted += count
+                    except Exception:
+                        pass
+                if inbox_deleted > 0:
+                    print(f"  Deleted: inbox/ ({inbox_deleted} files)")
+                    deleted += inbox_deleted
+
+        # Clear caches
+        self._datasets_cache.clear()
+        if hasattr(self, "_remote_vars") and self._remote_vars:
+            self._remote_vars._vars.clear()
+        if hasattr(self, "_peer_remote_vars") and self._peer_remote_vars:
+            self._peer_remote_vars._vars.clear()
+
+        print(f"✓ Session reset: {deleted} files deleted")
+        return deleted
+
     def wait_for_acceptance(
         self,
         timeout: float = 60.0,

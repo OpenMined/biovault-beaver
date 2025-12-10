@@ -43,6 +43,20 @@ from .envelope import BeaverEnvelope
 if TYPE_CHECKING:
     from .session import Session
 
+# Global context tracker for SyftBox-aware file operations
+_CURRENT_CONTEXT = None
+
+
+def _get_current_context():
+    """Get the current BeaverContext for SyftBox file operations."""
+    return _CURRENT_CONTEXT
+
+
+def _set_current_context(ctx):
+    """Set the current BeaverContext."""
+    global _CURRENT_CONTEXT
+    _CURRENT_CONTEXT = ctx
+
 
 class TrustedLoader:
     """
@@ -392,12 +406,17 @@ def _prepare_for_sending(
     from .twin import Twin
 
     def _write_artifact_encrypted(serializer, obj_to_write, path, backend, recipients):
-        """Write artifact using TrustedLoader serializer, optionally encrypting."""
+        """Write artifact using TrustedLoader serializer, optionally encrypting.
+
+        Returns metadata dict if serializer returns one, else None.
+        """
+        meta = None
         if backend and backend.uses_crypto and recipients:
             # Write to temp file first, then encrypt
             temp_path = Path(tempfile.gettempdir()) / f"_beaver_tmp_{uuid4().hex}.bin"
             try:
-                serializer(obj_to_write, temp_path)
+                meta = serializer(obj_to_write, temp_path)
+                # Write the main .bin file
                 data = temp_path.read_bytes()
                 backend.storage.write_with_shadow(
                     absolute_path=str(path),
@@ -411,7 +430,8 @@ def _prepare_for_sending(
                     temp_path.unlink()
         else:
             # Direct write (no encryption)
-            serializer(obj_to_write, path)
+            meta = serializer(obj_to_write, path)
+        return meta
 
     # Trusted loader conversion (non-Twin)
     lib_support.register_builtin_loader(obj, TrustedLoader)
@@ -421,7 +441,7 @@ def _prepare_for_sending(
         target_dir.mkdir(parents=True, exist_ok=True)
         base = name_hint or tl["name"].split(".")[-1] or "artifact"
         path = target_dir / f"{base}.bin"
-        _write_artifact_encrypted(tl["serializer"], obj, path, backend, recipients)
+        meta = _write_artifact_encrypted(tl["serializer"], obj, path, backend, recipients)
         import inspect
 
         src_lines = inspect.getsource(tl["deserializer"]).splitlines()
@@ -434,17 +454,22 @@ def _prepare_for_sending(
             )
         )
         src_clean = textwrap.dedent(src_clean)
-        return {
+        result = {
             "_trusted_loader": True,
             "name": tl["name"],
             "path": str(path),
             "deserializer_src": src_clean,
         }
+        if meta:
+            result["meta"] = meta  # Embed serializer metadata
+        return result
 
     # Handle Twin objects
     if isinstance(obj, Twin):
-        public_obj = obj.public
-        private_obj = obj.private if preserve_private else None
+        # Use object.__getattribute__ to bypass Twin's auto-load hook
+        # This allows passing through TrustedLoader dicts directly for re-serialization
+        public_obj = object.__getattribute__(obj, "public")
+        private_obj = object.__getattribute__(obj, "private") if preserve_private else None
 
         # Register trusted loaders for Twin's public/private content
         # (the main obj registration above only handles the outer Twin)
@@ -460,7 +485,9 @@ def _prepare_for_sending(
             target_dir.mkdir(parents=True, exist_ok=True)
             base = name_hint or getattr(public_obj, "name", None) or "artifact"
             path = target_dir / f"{base}_public.bin"
-            _write_artifact_encrypted(tl_pub["serializer"], public_obj, path, backend, recipients)
+            meta = _write_artifact_encrypted(
+                tl_pub["serializer"], public_obj, path, backend, recipients
+            )
             import inspect
 
             src_lines = inspect.getsource(tl_pub["deserializer"]).splitlines()
@@ -479,6 +506,8 @@ def _prepare_for_sending(
                 "path": str(path),
                 "deserializer_src": src_clean,
             }
+            if meta:
+                public_obj["meta"] = meta
 
         # Apply trusted loader to private side if preserving and available
         if preserve_private and private_obj is not None:
@@ -488,7 +517,7 @@ def _prepare_for_sending(
                 target_dir.mkdir(parents=True, exist_ok=True)
                 base = name_hint or getattr(private_obj, "name", None) or "artifact"
                 path = target_dir / f"{base}_private.bin"
-                _write_artifact_encrypted(
+                meta = _write_artifact_encrypted(
                     tl_priv["serializer"], private_obj, path, backend, recipients
                 )
                 import inspect
@@ -509,6 +538,8 @@ def _prepare_for_sending(
                     "path": str(path),
                     "deserializer_src": src_clean,
                 }
+                if meta:
+                    private_obj["meta"] = meta
 
         # Sanitize values before creating Twin to avoid serialization issues
         # Skip if already a trusted loader dict
@@ -783,6 +814,13 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
             )
         return obj
 
+    # Handle inline parquet bytes (pyfory serializes pandas DataFrames as parquet)
+    if twin_cls is not None and twin_cls._is_inline_parquet_bytes(obj):
+        result = twin_cls._load_inline_parquet(obj)
+        if result is not None:
+            return result
+        # Fall through if deserialization failed
+
     # Unwrap _beaver_figure dicts back to CapturedFigure for nice Jupyter display
     if isinstance(obj, dict) and obj.get("_beaver_figure") and captured_figure_cls is not None:
         return captured_figure_cls(obj)
@@ -811,6 +849,7 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         name = obj.get("name")
         data_path = obj.get("path")
         src = obj.get("deserializer_src", "")
+        meta = obj.get("meta")  # Embedded metadata (e.g., pandas kind/name)
 
         # Translate path from sender's perspective to local view
         # If path contains /datasites/<identity>/, map to our local view
@@ -868,6 +907,11 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
             scope["numpy"] = np
         except ImportError:
             pass
+
+        # Inject metadata if available (eliminates need for .meta.json files)
+        if meta is not None:
+            scope["_beaver_meta"] = meta
+
         exec(src, scope, scope)
         # Exclude TrustedLoader class and imported modules - we want the actual deserializer function
         excluded = {
@@ -2166,6 +2210,9 @@ class BeaverContext:
 
         if auto_load_replies:
             self.start_auto_load()
+
+        # Set as current context for SyftBox-aware file operations
+        _set_current_context(self)
 
     @property
     def settings(self):

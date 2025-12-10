@@ -208,7 +208,7 @@ class SessionDatasetInfo:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "SessionDatasetInfo":
+    def from_dict(cls, data: dict) -> SessionDatasetInfo:
         return cls(
             owner=data.get("owner", ""),
             name=data.get("name", ""),
@@ -238,7 +238,7 @@ class Session:
     _context: Optional[BeaverContext] = field(default=None, repr=False)
     _local_path: Optional[Path] = field(default=None, repr=False)
     _peer_path: Optional[Path] = field(default=None, repr=False)
-    _datasets_cache: Dict[str, "Dataset"] = field(default_factory=dict, repr=False)
+    _datasets_cache: Dict[str, Dataset] = field(default_factory=dict, repr=False)
 
     @property
     def context(self) -> Optional[BeaverContext]:
@@ -284,7 +284,7 @@ class Session:
         """Check if session is active."""
         return self.status == "active"
 
-    def load_dataset(self, owner: str, name: str) -> "Dataset":
+    def load_dataset(self, owner: str, name: str) -> Dataset:
         """
         Load a dataset associated with this session.
 
@@ -307,14 +307,13 @@ class Session:
         if cache_key in self._datasets_cache:
             return self._datasets_cache[cache_key]
 
-        from .datasets import Dataset as DatasetClass
 
         # Access via context's dataset registry
         dataset = self._context.datasets[owner][name]
         self._datasets_cache[cache_key] = dataset
         return dataset
 
-    def get_datasets(self) -> Dict[str, "Dataset"]:
+    def get_datasets(self) -> Dict[str, Dataset]:
         """
         Get all datasets associated with this session.
 
@@ -342,7 +341,7 @@ class Session:
 
         return result
 
-    def get_twins(self) -> Dict[str, "Twin"]:
+    def get_twins(self) -> Dict[str, Twin]:
         """
         Get all assets from all associated datasets as Twins.
 

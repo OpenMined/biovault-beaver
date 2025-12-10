@@ -79,12 +79,12 @@ def _register_pandas(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any
     name = f"{obj_type.__module__}.{obj_type.__name__}"
 
     @trusted_loader_cls.register(obj_type, name=name)
-    def pandas_serialize_file(frame_like: Any, path: Path) -> None:
+    def pandas_serialize_file(frame_like: Any, path: Path) -> dict:
+        """Serialize pandas object to parquet. Returns metadata dict."""
         _require("pyarrow", feature="pandas parquet serialization")
         from pathlib import Path as _Path
 
         path = _Path(path)
-        meta_path = path.with_suffix(path.suffix + ".meta.json")
         if isinstance(frame_like, pd.DataFrame):
             meta = {"kind": "dataframe"}
             frame_like.to_parquet(path, index=True, engine="pyarrow")
@@ -98,10 +98,13 @@ def _register_pandas(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any
             )
         else:
             raise TypeError(f"Unsupported pandas type: {type(frame_like)}")
-        meta_path.write_text(json.dumps(meta))
+        return meta  # Return metadata to be embedded in TrustedLoader dict
 
     @trusted_loader_cls.register(obj_type, name=name)
-    def pandas_deserialize_file(path: Path) -> Any:
+    def pandas_deserialize_file(path: Path, meta: dict = None) -> Any:
+        """Deserialize pandas object from parquet. Meta can be passed or read from .meta.json."""
+        import io as io_local
+
         try:
             import pandas as pd_local  # type: ignore
         except ImportError as exc:  # pragma: no cover - runtime env
@@ -119,19 +122,43 @@ def _register_pandas(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any
         from pathlib import Path as _Path
 
         path = _Path(path)
-        meta_path = path.with_suffix(path.suffix + ".meta.json")
-        meta = json.loads(meta_path.read_text())
+
+        # If meta not passed, try to get from _beaver_meta (injected) or .meta.json file
+        if meta is None:
+            _injected_meta = globals().get("_beaver_meta")
+            if _injected_meta is not None:
+                meta = _injected_meta
+            else:
+                # Fallback: read from .meta.json file (legacy support)
+                import json as json_local
+
+                meta_path = path.with_suffix(path.suffix + ".meta.json")
+                _read_text_fn = globals().get("_beaver_read_text")
+                if _read_text_fn is not None:
+                    meta_text = _read_text_fn(str(meta_path))
+                else:
+                    meta_text = meta_path.read_text()
+                meta = json_local.loads(meta_text)
+
+        # Read parquet data (may be encrypted)
+        _read_bytes_fn = globals().get("_beaver_read_bytes")
+        if _read_bytes_fn is not None:
+            parquet_bytes = _read_bytes_fn(str(path))
+            parquet_buffer = io_local.BytesIO(parquet_bytes)
+        else:
+            parquet_buffer = path
+
         kind = meta.get("kind")
         if kind == "dataframe":
-            return pd_local.read_parquet(path, engine="pyarrow")
+            return pd_local.read_parquet(parquet_buffer, engine="pyarrow")
         if kind == "series":
-            df = pd_local.read_parquet(path, engine="pyarrow")
+            df = pd_local.read_parquet(parquet_buffer, engine="pyarrow")
             ser = df.iloc[:, 0]
             ser.index = df.index
             ser.name = meta.get("name")
             return ser
         if kind == "index":
-            df = pd_local.read_parquet(path, engine="pyarrow")
+            df = pd_local.read_parquet(parquet_buffer, engine="pyarrow")
             ser = df["__index_values"]
             return pd_local.Index(ser, name=meta.get("name"))
         raise ValueError(f"Unknown pandas kind: {kind}")

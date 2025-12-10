@@ -1229,6 +1229,10 @@ class ComputationRequest:
         # Return a ComputationResult object instead of raw dict
         # Pass session reference if we have one
         session = getattr(self, "_session", None)
+        if session is None and context is not None:
+            session = getattr(context, "_active_session", None)
+            if session is not None:
+                self._session = session
         return ComputationResult(
             result=result_data["result"],
             stdout=result_data["stdout"],
@@ -1340,6 +1344,24 @@ class ComputationRequest:
                             # Register for future lookups
                             _TWIN_REGISTRY[(sv.twin_id, sv.owner)] = sv
                             return sv
+                # Also try matching by name in session's remote_vars (for DO receiving requests about their own Twins)
+                twin_name = val.get("name")
+                if (
+                    twin_name
+                    and context
+                    and hasattr(context, "_active_session")
+                    and context._active_session
+                ):
+                    session = context._active_session
+                    if hasattr(session, "remote_vars") and twin_name in session.remote_vars.vars:
+                        var = session.remote_vars.vars[twin_name]
+                        # Check _twin_reference first (set when publishing Twin), then _stored_value
+                        sv = getattr(var, "_twin_reference", None) or getattr(
+                            var, "_stored_value", None
+                        )
+                        if isinstance(sv, Twin):
+                            _TWIN_REGISTRY[(sv.twin_id, sv.owner)] = sv
+                            return sv
                 # Try loading from datasets if available (owner publishes assets)
                 if context and hasattr(context, "datasets"):
                     try:
@@ -1364,8 +1386,26 @@ class ComputationRequest:
                     except Exception:
                         # Avoid breaking computation if dataset lookup fails
                         pass
+                # Debug: show what we searched
+                debug_info = []
+                debug_info.append(
+                    f"twin_id={twin_id[:12]}, name={val.get('name')}, owner_hint={owner_hint}"
+                )
+                debug_info.append(f"_TWIN_REGISTRY keys: {list(_TWIN_REGISTRY.keys())[:5]}")
+                if context:
+                    debug_info.append(f"context.user={getattr(context, 'user', None)}")
+                    if hasattr(context, "_active_session") and context._active_session:
+                        sess = context._active_session
+                        debug_info.append(
+                            f"session exists, remote_vars.vars keys: {list(sess.remote_vars.vars.keys()) if hasattr(sess, 'remote_vars') else 'N/A'}"
+                        )
+                    else:
+                        debug_info.append("_active_session is None or missing")
+                else:
+                    debug_info.append("context is None")
                 raise ValueError(
-                    f"Twin reference '{val.get('name', 'unknown')}' (ID: {twin_id[:12]}...) not available locally"
+                    f"Twin reference '{val.get('name', 'unknown')}' (ID: {twin_id[:12]}...) not available locally\n"
+                    + "\n".join(debug_info)
                 )
             return val
 
@@ -1564,6 +1604,10 @@ class ComputationRequest:
 
         # Create ComputationResult with session reference if we have one
         session = getattr(self, "_session", None)
+        if session is None and context is not None:
+            session = getattr(context, "_active_session", None)
+            if session is not None:
+                self._session = session
         comp_result = ComputationResult(
             result=result_twin,
             stdout=stdout_str,
@@ -1689,6 +1733,24 @@ class ComputationRequest:
                     for var in context.remote_vars.vars.values():
                         sv = getattr(var, "_stored_value", None)
                         if isinstance(sv, Twin) and sv.twin_id == twin_id:
+                            _TWIN_REGISTRY[(sv.twin_id, sv.owner)] = sv
+                            return sv
+                # Also try matching by name in session's remote_vars (for DO receiving requests about their own Twins)
+                twin_name = val.get("name")
+                if (
+                    twin_name
+                    and context
+                    and hasattr(context, "_active_session")
+                    and context._active_session
+                ):
+                    session = context._active_session
+                    if hasattr(session, "remote_vars") and twin_name in session.remote_vars.vars:
+                        var = session.remote_vars.vars[twin_name]
+                        # Check _twin_reference first (set when publishing Twin), then _stored_value
+                        sv = getattr(var, "_twin_reference", None) or getattr(
+                            var, "_stored_value", None
+                        )
+                        if isinstance(sv, Twin):
                             _TWIN_REGISTRY[(sv.twin_id, sv.owner)] = sv
                             return sv
                 # Try loading from datasets if available (owner publishes assets)
@@ -1967,6 +2029,10 @@ class ComputationRequest:
 
         # Return ComputationResult with session reference if we have one
         session = getattr(self, "_session", None)
+        if session is None and context is not None:
+            session = getattr(context, "_active_session", None)
+            if session is not None:
+                self._session = session
         return ComputationResult(
             result=result_twin,
             stdout=public_stdout,

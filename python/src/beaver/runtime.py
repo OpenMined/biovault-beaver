@@ -2988,9 +2988,23 @@ class BeaverContext:
 
         candidate_inboxes = self._candidate_inboxes(include_session=include_session)
 
+        # Track processed requests to avoid returning same request twice
+        if not hasattr(self, "_processed_request_ids"):
+            self._processed_request_ids = set()
+
+        def _is_processed(env):
+            """Check if this request was already processed."""
+            return env.envelope_id in self._processed_request_ids
+
+        def _mark_processed(env):
+            """Mark request as processed so we don't return it again."""
+            self._processed_request_ids.add(env.envelope_id)
+
         def _matches_target_fast(env):
             """Quick check if envelope might match our target (metadata only)."""
             if not env.name or not env.name.startswith("request_"):
+                return False
+            if _is_processed(env):
                 return False
             if not target_name:
                 return True
@@ -3005,8 +3019,10 @@ class BeaverContext:
             )
             return inputs_match or signature_match
 
-        def _matches_target_deep(obj):
+        def _matches_target_deep(obj, env):
             """Deep check if unpacked ComputationRequest matches target by checking args."""
+            if _is_processed(env):
+                return False
             if not target_name:
                 return True
             if hasattr(obj, "args"):
@@ -3023,17 +3039,19 @@ class BeaverContext:
                     print(f"📬 Found existing request: {env.name}")
                     print(f"   From: {env.sender}")
                     obj = unpack(env, strict=self.strict, policy=self.policy)
+                    _mark_processed(env)
                     return obj
 
         # If target specified but no fast match, try deep matching (unpack and check args)
         if target_name:
             for inbox_path in candidate_inboxes:
                 for env in list_inbox(inbox_path, backend=self._backend):
-                    if env.name and env.name.startswith("request_"):
+                    if env.name and env.name.startswith("request_") and not _is_processed(env):
                         obj = unpack(env, strict=self.strict, policy=self.policy)
-                        if _matches_target_deep(obj):
+                        if _matches_target_deep(obj, env):
                             print(f"📬 Found existing request: {env.name}")
                             print(f"   From: {env.sender}")
+                            _mark_processed(env)
                             return obj
 
         # No existing match - now wait for new ones
@@ -3052,24 +3070,31 @@ class BeaverContext:
         while time.monotonic() < deadline:
             for inbox_path in candidate_inboxes:
                 for env in list_inbox(inbox_path, backend=self._backend):
-                    # Skip already-seen
+                    # Skip already-seen in this wait loop
                     if env.envelope_id in seen_ids:
                         continue
                     seen_ids.add(env.envelope_id)
 
-                    # Try fast match first
+                    # Try fast match first (includes _is_processed check)
                     if _matches_target_fast(env):
                         print(f"📬 Request received: {env.name}")
                         print(f"   From: {env.sender}")
                         obj = unpack(env, strict=self.strict, policy=self.policy)
+                        _mark_processed(env)
                         return obj
 
                     # For new requests, also try deep match if target specified
-                    if target_name and env.name and env.name.startswith("request_"):
+                    if (
+                        target_name
+                        and env.name
+                        and env.name.startswith("request_")
+                        and not _is_processed(env)
+                    ):
                         obj = unpack(env, strict=self.strict, policy=self.policy)
-                        if _matches_target_deep(obj):
+                        if _matches_target_deep(obj, env):
                             print(f"📬 Request received: {env.name}")
                             print(f"   From: {env.sender}")
+                            _mark_processed(env)
                             return obj
 
             time.sleep(poll_interval)
@@ -3285,6 +3310,8 @@ class BeaverContext:
         """
         Build a list of inbox paths to watch. By default, this is the base inbox
         plus the active session's peer folder (where requests/results land).
+        Also includes peer's root biovault folder for fallback case when results
+        are sent to inbox instead of session folder.
         """
         paths = []
         base = base_path or self.inbox_path
@@ -3295,6 +3322,10 @@ class BeaverContext:
                 self._active_session._setup_paths()
             if self._active_session.peer_folder:
                 paths.append(self._active_session.peer_folder)
+                # Also check peer's root biovault folder (for results sent to inbox instead of session)
+                peer_root = self._active_session.peer_folder.parent.parent
+                if peer_root.exists() and peer_root != self._active_session.peer_folder:
+                    paths.append(peer_root)
 
         # Deduplicate while preserving order
         unique = []

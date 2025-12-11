@@ -2169,6 +2169,12 @@ class BeaverContext:
         poll_interval: float = 0.5,
         _backend=None,  # SyftBoxBackend instance for encrypted mode
     ) -> None:
+        # If caller passed the default "unknown", try env so we avoid creating paths under "unknown"
+        if user == "unknown":
+            import os
+
+            user = os.environ.get("SYFTBOX_EMAIL", user)
+
         self.inbox_path = Path(inbox)
         self.outbox = Path(outbox) if outbox is not None else self.inbox_path
         self.user = user
@@ -3463,15 +3469,40 @@ def connect(
         # Auto-detect email from SyftBox config if not provided
         effective_user = user
         if user == "unknown":
-            config_path = Path(data_dir) / ".syftbox" / "config.json"
-            if config_path.exists():
-                import json
+            import json
+            import os
 
-                try:
-                    config = json.loads(config_path.read_text())
-                    effective_user = config.get("email", user)
-                except Exception:
-                    pass
+            # 1) Explicit env var
+            effective_user = os.environ.get("SYFTBOX_EMAIL", user)
+
+            # 2) Env override for config path
+            if effective_user == "unknown":
+                env_config = os.environ.get("SYFTBOX_CONFIG_PATH")
+                if env_config:
+                    config_path = Path(env_config)
+                    if config_path.exists():
+                        try:
+                            config = json.loads(config_path.read_text())
+                            effective_user = config.get("email", user)
+                        except Exception:
+                            pass
+
+            # 3) Config files in standard locations
+            if effective_user == "unknown":
+                config_candidates = [
+                    Path(data_dir) / "syftbox" / "config.json",  # desktop location
+                    Path(data_dir) / ".syftbox" / "config.json",  # legacy CLI location
+                ]
+
+                for config_path in config_candidates:
+                    if config_path.exists():
+                        try:
+                            config = json.loads(config_path.read_text())
+                            effective_user = config.get("email", user)
+                            if effective_user != user:
+                                break
+                        except Exception:
+                            continue
 
         from .syftbox_backend import SyftBoxBackend
 

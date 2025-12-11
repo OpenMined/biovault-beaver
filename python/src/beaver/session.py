@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import platform
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 from uuid import uuid4
@@ -36,6 +39,22 @@ def _iso_now() -> str:
 def _generate_session_id() -> str:
     """Generate a short random session ID."""
     return hashlib.sha256(uuid4().bytes).hexdigest()[:12]
+
+
+def _pkg_version(name: str) -> Optional[str]:
+    try:
+        return metadata.version(name)
+    except Exception:
+        return None
+
+
+def _version_info() -> Dict[str, Optional[str]]:
+    info: Dict[str, Optional[str]] = {}
+    info["beaver"] = _pkg_version("biovault-beaver") or _pkg_version("beaver")
+    info["syftbox_sdk"] = _pkg_version("syftbox-sdk")
+    info["python"] = sys.version.split()[0]
+    info["platform"] = platform.platform()
+    return info
 
 
 class SessionWorkspace:
@@ -653,6 +672,141 @@ rules:
         self._write_permission_file()
 
         print(f"📁 Created session folder: {self._local_path}")
+
+    def _default_state_path(self) -> Path:
+        """Return a private, non-shared path for session state snapshots."""
+        base = os.environ.get("BEAVER_STATE_DIR")
+        if base:
+            root = Path(base)
+        elif os.environ.get("VIRTUAL_ENV"):
+            root = Path(os.environ["VIRTUAL_ENV"])
+        else:
+            root = Path(sys.prefix)
+        root = root / "beaver_state"
+        root.mkdir(parents=True, exist_ok=True)
+        owner_slug = self.owner.replace("@", "_at_").replace("/", "_")
+        return root / f"{self.session_id}_{owner_slug}.beaver"
+
+    def save(
+        self,
+        path: Optional[Path | str] = None,
+        *,
+        globals_ns: Optional[dict] = None,
+        include_private: bool = False,
+        strict: bool = False,
+        policy=None,
+    ) -> Path:
+        """
+        Snapshot current globals into a private .beaver file for later restore.
+        """
+        from . import runtime
+
+        target = Path(path) if path is not None else self._default_state_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        ns = globals_ns
+        if ns is None:
+            try:
+                import __main__
+
+                ns = __main__.__dict__
+            except Exception:
+                ns = globals()
+
+        payload = runtime._filtered_namespace(ns, include_private=include_private)
+        fory = runtime.pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
+        payload = runtime._serializable_subset(payload, fory)
+
+        env = runtime.pack(
+            payload,
+            sender=self.owner or "unknown",
+            name="session_state",
+            strict=strict,
+            policy=policy,
+        )
+        env.manifest["session_state"] = {
+            "session_id": self.session_id,
+            "peer": self.peer,
+            "owner": self.owner,
+            "role": self.role,
+            "created_at": self.created_at,
+            "saved_at": _iso_now(),
+            "versions": _version_info(),
+            "items": len(payload),
+        }
+
+        target.write_text(json.dumps(runtime._envelope_record(env), indent=2))
+        return target
+
+    def load(
+        self,
+        path: Optional[Path | str] = None,
+        *,
+        globals_ns: Optional[dict] = None,
+        overwrite: bool = False,
+        strict: bool = False,
+        policy=None,
+        auto_accept: bool = False,
+    ):
+        """
+        Restore variables from a saved session state file into globals.
+        """
+        from . import runtime
+
+        target = Path(path) if path is not None else self._default_state_path()
+        if not target.exists():
+            raise FileNotFoundError(f"State file not found: {target}")
+
+        env = runtime.read_envelope(target)
+        meta = env.manifest.get("session_state", {})
+
+        if meta and meta.get("session_id") and meta["session_id"] != self.session_id:
+            print(
+                f"⚠️  State file session_id {meta.get('session_id')} does not match "
+                f"active session {self.session_id}"
+            )
+
+        saved_versions = meta.get("versions", {})
+        current_versions = _version_info()
+        mismatches = []
+        for key, saved_val in saved_versions.items():
+            current_val = current_versions.get(key)
+            if saved_val and current_val and saved_val != current_val:
+                mismatches.append(f"{key}: saved {saved_val}, current {current_val}")
+        if mismatches:
+            print("⚠️  Version differences detected:")
+            for line in mismatches:
+                print(f"   - {line}")
+
+        backend = (
+            self._context._backend if self._context and hasattr(self._context, "_backend") else None
+        )
+        obj = runtime.unpack(
+            env, strict=strict, policy=policy, auto_accept=auto_accept, backend=backend
+        )
+
+        target_globals = globals_ns
+        if target_globals is None:
+            try:
+                import __main__
+
+                target_globals = __main__.__dict__
+            except Exception:
+                target_globals = globals()
+
+        if target_globals is not None:
+            if not overwrite:
+                should = runtime._check_overwrite(
+                    obj, globals_ns=target_globals, name_hint=env.name
+                )
+                if not should:
+                    print("⚠️  Load cancelled - no variables were overwritten")
+                    return obj
+            injected = runtime._inject(obj, globals_ns=target_globals, name_hint=env.name)
+            if injected:
+                print(f"✓ Restored {len(injected)} variables from state")
+
+        return obj
 
     @property
     def remote_vars(self):

@@ -95,6 +95,11 @@ class SyftBoxBackend:
 
         self._syft = syft
         self.data_dir = Path(data_dir).resolve()
+        # Allow env override so we never fall back to "unknown"
+        if email == "unknown":
+            import os
+
+            email = os.environ.get("SYFTBOX_EMAIL", email)
         self.email = email
         self.disable_crypto = disable_crypto
 

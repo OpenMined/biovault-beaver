@@ -11,6 +11,7 @@ from .computation import (
 from .datasets import DatasetRegistry
 from .envelope import BeaverEnvelope
 from .lib_support import register_builtin_loader
+from .live_var import LiveVar
 from .mappings import MappingStore
 from .policy import (
     PERMISSIVE_POLICY,
@@ -42,6 +43,7 @@ from .runtime import (
 )
 from .session import Session, SessionRequest, SessionRequestsView
 from .twin import CapturedFigure, Twin
+from .twin_func import TwinFunc, func_to_ref, resolve_func_ref
 from .twin_result import TwinComputationResult
 
 # Debug flag for beaver output

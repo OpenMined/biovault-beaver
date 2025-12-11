@@ -677,6 +677,11 @@ def pack(
 
     fory.register_type(Twin)
 
+    # Register LiveVar type
+    from .live_var import LiveVar
+
+    fory.register_type(LiveVar)
+
     payload = fory.dumps(obj_to_send)
     manifest = _summarize(obj)
     manifest["size_bytes"] = len(payload)
@@ -776,6 +781,11 @@ def unpack(
     from .twin import Twin
 
     fory.register_type(Twin)
+
+    # Register LiveVar type
+    from .live_var import LiveVar
+
+    fory.register_type(LiveVar)
 
     obj = fory.loads(envelope.payload)
     obj = _resolve_trusted_loader(obj, auto_accept=auto_accept, backend=backend)
@@ -1930,9 +1940,12 @@ def export(
                             matplotlib.use(original_backend, force=True)
 
                 # Create ComputationRequest for private execution
-                # Convert Twins to references (pointer dicts) to avoid serializing full data
+                # Convert Twins and TwinFuncs to references (pointer dicts)
+                from .twin_func import TwinFunc
+                from .twin_func import func_to_ref as _func_to_ref
+
                 def twin_to_ref(val):
-                    """Convert Twin to pointer reference for serialization."""
+                    """Convert Twin/TwinFunc to pointer reference for serialization."""
                     if isinstance(val, Twin):
                         return {
                             "_beaver_twin_ref": True,
@@ -1942,6 +1955,12 @@ def export(
                             "syft_url": getattr(val, "syft_url", None),
                             "dataset_asset": getattr(val, "dataset_asset", None),
                         }
+                    # Handle TwinFunc references
+                    if isinstance(val, TwinFunc):
+                        return val.to_ref()
+                    # Handle registered callables with beaver metadata
+                    if callable(val) and hasattr(val, "_beaver_func_id"):
+                        return _func_to_ref(val)
                     return val
 
                 ref_args = tuple(twin_to_ref(arg) for arg in args)

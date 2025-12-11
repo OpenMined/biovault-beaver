@@ -188,3 +188,73 @@ def test_trusted_policy_allows_function_deserialize(monkeypatch):
     # Should not raise
     obj = runtime.unpack(env, auto_accept=True)
     assert callable(obj)
+
+
+def test_twin_attribute_access_does_not_auto_execute_loader(tmp_path):
+    """Accessing Twin.public or Twin.private should NOT auto-execute loader code.
+
+    This tests the __getattribute__ hook security - simply reading the attribute
+    should return the raw TrustedLoader dict, not trigger code execution.
+
+    Uses only allowed imports (pathlib) to ensure the security comes from
+    NOT auto-executing, rather than from import blocking.
+    """
+    from beaver.twin import Twin
+
+    marker = tmp_path / "getattr_pwned.txt"
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(b"dummy data")
+
+    # Use only allowed imports to isolate the auto-execute behavior
+    loader_with_side_effect = {
+        "_trusted_loader": True,
+        "path": str(artifact),
+        "deserializer_src": (
+            f"import pathlib\n"
+            f"def load(p):\n"
+            f"    pathlib.Path('{marker}').write_text('executed')\n"
+            f"    return 'loaded'\n"
+        ),
+    }
+
+    twin = Twin(public=loader_with_side_effect, private=None, owner="attacker")
+
+    # Accessing .public should NOT execute the loader - should return raw dict
+    result = twin.public
+
+    # The result should be the raw TrustedLoader dict, NOT the executed result
+    assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+    assert result.get("_trusted_loader") is True, "Should return raw TrustedLoader dict"
+    assert not marker.exists(), "Loader was auto-executed just by accessing .public!"
+
+
+def test_twin_private_attribute_access_does_not_auto_execute_loader(tmp_path):
+    """Same test for .private attribute access."""
+    from beaver.twin import Twin
+
+    marker = tmp_path / "private_getattr_pwned.txt"
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(b"dummy data")
+
+    # Use only allowed imports
+    loader_with_side_effect = {
+        "_trusted_loader": True,
+        "path": str(artifact),
+        "deserializer_src": (
+            f"import pathlib\n"
+            f"def load(p):\n"
+            f"    pathlib.Path('{marker}').write_text('executed')\n"
+            f"    return 'loaded'\n"
+        ),
+    }
+
+    # Need public to be set for Twin to be valid
+    twin = Twin(public="safe_mock", private=loader_with_side_effect, owner="attacker")
+
+    # Accessing .private should NOT execute the loader - should return raw dict
+    result = twin.private
+
+    # The result should be the raw TrustedLoader dict
+    assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+    assert result.get("_trusted_loader") is True, "Should return raw TrustedLoader dict"
+    assert not marker.exists(), "Loader was auto-executed just by accessing .private!"

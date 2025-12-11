@@ -344,7 +344,12 @@ class Twin(LiveMixin, RemoteData):
             _TWIN_REGISTRY[key] = self
 
     def __getattribute__(self, name: str):
-        """Intercept access to public/private to auto-resolve TrustedLoader dicts."""
+        """Intercept access to public/private to handle special cases.
+
+        SECURITY: This hook does NOT auto-execute TrustedLoader code.
+        Users must explicitly call .load() to execute loader code.
+        This prevents unexpected code execution from simple attribute access.
+        """
         # Get the raw value first (avoid infinite recursion)
         value = object.__getattribute__(self, name)
 
@@ -358,41 +363,15 @@ class Twin(LiveMixin, RemoteData):
                 pass
 
             # Handle inline parquet blobs (e.g., decrypted trusted loader payloads)
+            # This is safe - just deserializing data bytes, no code execution
             inline = Twin._load_inline_parquet(value)
             if inline is not None:
                 object.__setattr__(self, name, inline)
                 return inline
 
-            # Check if it's a TrustedLoader dict
-            if isinstance(value, dict) and value.get("_trusted_loader") is True:
-                # Check if the data file exists - if not, return the dict as-is
-                # This allows serialization to work without triggering loads
-                from pathlib import Path
-
-                data_path = value.get("path")
-                if data_path and not Path(data_path).exists():
-                    # File doesn't exist - return raw dict for serialization passthrough
-                    return value
-
-                # Set loading flag to prevent recursion
-                object.__setattr__(self, "_loading", True)
-                try:
-                    # Prompt user to load
-                    twin_name = (
-                        object.__getattribute__(self, "name")
-                        or object.__getattribute__(self, "twin_id")[:8]
-                    )
-                    print(f"\n⚠️  Twin '{twin_name}' .{name} has unloaded data.")
-                    print("   Call .load() to load it, or approve now:")
-
-                    # Use the load method to resolve
-                    load_method = object.__getattribute__(self, "load")
-                    load_method(which=name)
-
-                    # Return the now-resolved value
-                    return object.__getattribute__(self, name)
-                finally:
-                    object.__setattr__(self, "_loading", False)
+            # SECURITY: TrustedLoader dicts are returned as-is
+            # Users must explicitly call .load() to execute loader code
+            # This prevents unexpected code execution from attribute access
 
         return value
 

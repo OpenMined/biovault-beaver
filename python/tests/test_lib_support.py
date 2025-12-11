@@ -151,7 +151,9 @@ def _clean_source(fn: Callable[..., Any]) -> str:
     return textwrap.dedent(cleaned)
 
 
-def _run_deserializer_in_subprocess(src: str, data_path: Path) -> Dict[str, Any]:
+def _run_deserializer_in_subprocess(
+    src: str, data_path: Path, meta: Optional[dict] = None
+) -> Dict[str, Any]:
     script_lines = [
         "import json",
         "from pathlib import Path",
@@ -177,6 +179,9 @@ def _run_deserializer_in_subprocess(src: str, data_path: Path) -> Dict[str, Any]
         "        exec(_stmt, scope, scope)",
         "    except Exception:",
         "        pass",
+        "",
+        # Inject metadata if provided (mirrors runtime injection)
+        f"scope['_beaver_meta'] = {json.dumps(meta) if meta is not None else 'None'}",
         "",
         SUMMARY_SOURCE,
         f"exec({src!r}, scope, scope)",
@@ -304,11 +309,11 @@ def test_roundtrip_serialization(case: Dict[str, Any], tmp_path: Path) -> None:
     assert handler is not None, "Handler should be registered for object"
 
     data_path = tmp_path / f"{case['name']}.bin"
-    handler["serializer"](obj, data_path)
+    meta = handler["serializer"](obj, data_path)
     deser_src = _clean_source(handler["deserializer"])
 
     expected = summarize(obj)
-    observed = _run_deserializer_in_subprocess(deser_src, data_path)
+    observed = _run_deserializer_in_subprocess(deser_src, data_path, meta=meta)
     assert expected == observed
 
 

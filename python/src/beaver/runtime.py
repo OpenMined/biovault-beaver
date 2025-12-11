@@ -3432,6 +3432,23 @@ def connect(
         # Legacy filesystem mode
         bv = beaver.connect("shared", user="bob", syftbox=False)
     """
+    import os
+
+    def _env_flag(name: str) -> bool:
+        return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+    # Allow tests/CLI to force local filesystem mode without changing notebook code
+    if (
+        _env_flag("BEAVER_LOCAL_MODE")
+        or _env_flag("BEAVER_DISABLE_SYFTBOX")
+        or _env_flag("BEAVER_FORCE_LEGACY")
+    ):
+        syftbox = False
+
+    # Auto-detect user from environment if not provided
+    if user == "unknown":
+        user = os.environ.get("BEAVER_USER") or os.environ.get("SYFTBOX_EMAIL") or "unknown"
+
     # Auto-fallback to legacy mode if caller passed a folder but no data_dir
     if syftbox and data_dir is None and folder is not None:
         syftbox = False
@@ -3508,11 +3525,27 @@ def connect(
             _backend=backend,
         )
     else:
-        # Legacy filesystem mode
+        # Local filesystem mode
+        # Allow env override for folder (shared session dir) even if data_dir was provided
+        session_dir_env = (
+            os.environ.get("BEAVER_LOCAL_SESSION_DIR")
+            or os.environ.get("BEAVER_SESSION_DIR")
+            or os.environ.get("BEAVER_LOCAL_FOLDER")
+            or os.environ.get("BEAVER_LEGACY_FOLDER")
+        )
+        if session_dir_env:
+            folder = session_dir_env
+        elif folder is None and data_dir is not None:
+            folder = data_dir
+
         if folder is None:
             raise ValueError("folder is required when syftbox=False")
         base = Path(folder)
-        user_subdir = base / user if user else base
+
+        # Optionally keep all users in the same folder for tests (no per-user subdir)
+        shared_local = _env_flag("BEAVER_LOCAL_SHARED") or _env_flag("BEAVER_LEGACY_SHARED")
+        user_subdir = base if shared_local else (base / user if user else base)
+
         return BeaverContext(
             inbox=inbox if inbox is not None else user_subdir,
             outbox=outbox if outbox is not None else user_subdir,

@@ -71,3 +71,4 @@ examples/**/.nextflow*
 
 sandbox/**
 .venv*/*
+notebooks/old/single_cell/data/*

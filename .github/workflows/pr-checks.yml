@@ -47,9 +47,11 @@ jobs:
       - name: Install dependencies
         run: |
           cd python
-          uv sync --extra dev
+          uv sync --python ${{ matrix.python-version }} --extra dev
 
       - name: Run tests
+        env:
+          UV_PYTHON: ${{ matrix.python-version }}
         run: bash test.sh
 
   lib-support:

@@ -209,6 +209,22 @@ for pid in "${PIDS[@]:-}"; do
     [[ -n "$pid" ]] && { wait "$pid" || RET=1; }
 done
 
+# In interactive mode, wait for user to press Ctrl+C
+if [[ "$INTERACTIVE" == "1" ]]; then
+    echo ""
+    echo "=========================================="
+    echo "Jupyter servers running. Open in browser:"
+    for i in "${!ROLES[@]}"; do
+        local_port=$((8888 + i))
+        echo "  [${ROLES[i]}] http://localhost:$local_port"
+    done
+    echo ""
+    echo "Press Ctrl+C to stop all servers..."
+    echo "=========================================="
+    # Wait forever (until Ctrl+C)
+    wait
+fi
+
 echo ""
 [[ "$RET" == "0" ]] && echo "✓ ALL TESTS PASSED" || echo "✗ TESTS FAILED"
 exit "$RET"

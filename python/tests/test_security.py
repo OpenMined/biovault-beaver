@@ -258,3 +258,106 @@ def test_twin_private_attribute_access_does_not_auto_execute_loader(tmp_path):
     assert isinstance(result, dict), f"Expected dict, got {type(result)}"
     assert result.get("_trusted_loader") is True, "Should return raw TrustedLoader dict"
     assert not marker.exists(), "Loader was auto-executed just by accessing .private!"
+
+
+def test_sender_verification_rejects_spoofed_sender(tmp_path):
+    """read_envelope_verified should reject envelopes with spoofed sender."""
+    try:
+        import syftbox_sdk as syft
+        from syftbox_sdk import SyftBoxStorage
+
+        if not hasattr(SyftBoxStorage, "read_with_shadow_metadata"):
+            pytest.skip("syftbox-sdk missing read_with_shadow_metadata")
+    except ImportError:
+        pytest.skip("syftbox-sdk not available")
+
+    from beaver.envelope import BeaverEnvelope
+    from beaver.syftbox_backend import (
+        SenderVerificationError,
+        SyftBoxBackend,
+    )
+
+    # Set up two identities
+    alice_data = tmp_path / "alice"
+    bob_data = tmp_path / "bob"
+
+    alice_vault = alice_data / ".syc"
+    bob_vault = bob_data / ".syc"
+
+    alice_datasites = alice_data / "datasites"
+    bob_datasites = bob_data / "datasites"
+
+    alice_datasites.mkdir(parents=True)
+    bob_datasites.mkdir(parents=True)
+
+    # Provision identities
+    alice = syft.provision_identity(
+        identity="alice@test.local",
+        data_root=str(alice_data),
+        vault_override=str(alice_vault),
+    )
+    bob = syft.provision_identity(
+        identity="bob@test.local",
+        data_root=str(bob_data),
+        vault_override=str(bob_vault),
+    )
+
+    # Exchange keys
+    syft.import_bundle(bob.public_bundle_path, str(alice_vault), "bob@test.local")
+    syft.import_bundle(alice.public_bundle_path, str(bob_vault), "alice@test.local")
+
+    # Create Alice's backend
+    alice_backend = SyftBoxBackend(
+        data_dir=alice_data,
+        email="alice@test.local",
+        vault_path=alice_vault,
+    )
+
+    # Create an envelope that CLAIMS to be from "evil@attacker.com" but is
+    # actually signed/encrypted by alice@test.local
+    spoofed_envelope = BeaverEnvelope(
+        sender="evil@attacker.com",  # Spoofed sender!
+        payload=b"malicious payload",
+        name="spoofed_message",
+    )
+
+    # Write it using Alice's credentials (so crypto signature is from alice)
+    test_file = alice_datasites / "alice@test.local" / "shared" / "biovault" / "spoofed.beaver"
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+
+    alice_backend.write_envelope(spoofed_envelope, recipients=["bob@test.local"])
+
+    # Copy to Bob's view (simulating sync)
+    bob_alice_shared = bob_datasites / "alice@test.local" / "shared" / "biovault"
+    bob_alice_shared.mkdir(parents=True, exist_ok=True)
+    (bob_alice_shared / "spoofed.beaver").write_bytes(
+        (
+            alice_datasites
+            / "alice@test.local"
+            / "shared"
+            / "biovault"
+            / f"{spoofed_envelope.envelope_id}.beaver"
+        ).read_bytes()
+    )
+
+    # Create Bob's backend
+    bob_backend = SyftBoxBackend(
+        data_dir=bob_data,
+        email="bob@test.local",
+        vault_path=bob_vault,
+    )
+
+    # Reading with verification should REJECT the spoofed sender
+    with pytest.raises(SenderVerificationError) as exc_info:
+        bob_backend.read_envelope_verified(bob_alice_shared / "spoofed.beaver")
+
+    assert exc_info.value.claimed_sender == "evil@attacker.com"
+    assert exc_info.value.verified_sender == "alice@test.local"
+
+    # Reading without verification should return the envelope with verified sender info
+    envelope, verified_sender, fingerprint = bob_backend.read_envelope_verified(
+        bob_alice_shared / "spoofed.beaver", verify=False
+    )
+    assert envelope.sender == "evil@attacker.com"  # Claimed sender
+    assert verified_sender == "alice@test.local"  # Actual sender
+    assert len(fingerprint) == 64  # SHA256 hex

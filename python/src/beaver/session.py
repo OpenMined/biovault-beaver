@@ -781,8 +781,12 @@ rules:
         backend = (
             self._context._backend if self._context and hasattr(self._context, "_backend") else None
         )
+        # Session state is user's own saved data - use trusted policy by default
+        from .policy import TRUSTED_POLICY
+
+        effective_policy = policy if policy is not None else TRUSTED_POLICY
         obj = runtime.unpack(
-            env, strict=strict, policy=policy, auto_accept=auto_accept, backend=backend
+            env, strict=strict, policy=effective_policy, auto_accept=auto_accept, backend=backend
         )
 
         target_globals = globals_ns

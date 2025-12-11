@@ -25,7 +25,7 @@ dependencies = [
     "numpy",
     "RestrictedPython",
     "zstandard>=0.20.0",
-    "syftbox-sdk",
+    "syftbox-sdk>=0.1.10",  # requires read_with_shadow_metadata for sender verification
 ]
 
 [project.scripts]

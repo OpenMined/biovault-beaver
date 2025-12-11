@@ -298,7 +298,7 @@ class _FnDecorator:
 fn = _FnDecorator()
 
 
-__version__ = "0.1.28"
+__version__ = "0.1.29"
 __all__ = [
     "active_session",
     "BeaverContext",

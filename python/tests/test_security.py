@@ -116,3 +116,75 @@ def test_auto_accept_does_not_run_untrusted_loader():
     env = BeaverEnvelope(payload=runtime.pack(payload).payload)
     with pytest.raises(runtime.SecurityError):
         runtime.unpack(env, auto_accept=True)
+
+
+def test_envelope_load_blocks_function_payload():
+    """Envelope.load should refuse function payloads under default policy."""
+
+    def evil():
+        return "bad"
+
+    env = runtime.pack(evil, sender="attacker")
+    with pytest.raises(runtime.SecurityError):
+        env.load(inject=False)
+
+
+def test_twin_load_blocks_untrusted_loader_auto_accept(tmp_path):
+    """Twin.load should still block untrusted loader even with auto_accept=True."""
+    from beaver.twin import Twin
+
+    loader = {
+        "_trusted_loader": True,
+        "path": str(tmp_path / "artifact.bin"),
+        "deserializer_src": "def load(p):\n    return __import__('os').getpid()",
+    }
+    twin = Twin(public=loader, private=None, owner="attacker")
+
+    with pytest.raises(runtime.SecurityError):
+        twin.load(which="public", auto_accept=True)
+
+
+def test_trusted_loader_allows_allowed_import_and_globals(monkeypatch, tmp_path):
+    """Trusted loader path allows allowed imports and globals() without exposing full globals."""
+    monkeypatch.setenv("BEAVER_TRUSTED_LOADERS", "1")
+    loader = {
+        "_trusted_loader": True,
+        "path": str(tmp_path / "data.bin"),
+        "deserializer_src": (
+            "import json\n"
+            "def load(p):\n"
+            "    g = globals()\n"
+            "    return {'p': p, 'mod': json.__name__, 'global_ok': g is not None}\n"
+        ),
+    }
+
+    result = runtime._resolve_trusted_loader(loader, auto_accept=True, backend=None)
+    assert result["p"] == loader["path"]
+    assert result["mod"] == "json"
+    assert result["global_ok"] is True
+
+
+def test_trusted_loader_blocks_disallowed_import(monkeypatch, tmp_path):
+    """Even in trusted mode, disallowed imports are blocked."""
+    monkeypatch.setenv("BEAVER_TRUSTED_LOADERS", "1")
+    loader = {
+        "_trusted_loader": True,
+        "path": str(tmp_path / "data.bin"),
+        "deserializer_src": "import os\ndef load(p):\n    return os.getcwd()\n",
+    }
+
+    with pytest.raises(runtime.SecurityError):
+        runtime._resolve_trusted_loader(loader, auto_accept=True, backend=None)
+
+
+def test_trusted_policy_allows_function_deserialize(monkeypatch):
+    """Trusted policy env should allow function payloads."""
+
+    def f():
+        return "ok"
+
+    monkeypatch.setenv("BEAVER_TRUSTED_POLICY", "1")
+    env = runtime.pack(f, sender="me")
+    # Should not raise
+    obj = runtime.unpack(env, auto_accept=True)
+    assert callable(obj)

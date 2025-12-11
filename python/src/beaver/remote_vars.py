@@ -898,11 +898,12 @@ class RemoteVarPointer:
                 missing.append(pkg)
         return missing
 
-    def _auto_load_twin(self, *, auto_accept: bool = False):
+    def _auto_load_twin(self, *, auto_accept: bool = False, policy=None):
         """Auto-load Twin from published location if this is a Twin type.
 
         Args:
             auto_accept: If True, automatically accept trusted loaders without prompting
+            policy: Deserialization policy to enforce (default: runtime default)
         """
         # Check if already loaded
         if self._loaded_twin is not None:
@@ -1024,7 +1025,9 @@ class RemoteVarPointer:
                             env = read_envelope(data_path)
                     else:
                         env = read_envelope(data_path)
-                    twin = env.load(inject=False, auto_accept=auto_accept, backend=backend)
+                    twin = env.load(
+                        inject=False, auto_accept=auto_accept, backend=backend, policy=policy
+                    )
                     if hasattr(twin, "public"):
                         twin.public = _ensure_sparse_shapes(twin.public)
                         # Swap public for a safe display proxy, keep raw on the side
@@ -1113,7 +1116,7 @@ class RemoteVarPointer:
         # If the Twin couldn't be loaded yet, but the caller is asking for .public/.private/.value,
         # try one more time and give a helpful error (including dependency hints).
         if name in {"public", "private", "value"}:
-            twin = self._auto_load_twin()
+            twin = self._auto_load_twin(policy=None)
             if twin is not None and hasattr(twin, name):
                 value = getattr(twin, name)
                 try:
@@ -1151,7 +1154,12 @@ class RemoteVarPointer:
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def load(
-        self, *, inject: bool = True, as_name: Optional[str] = None, auto_accept: bool = False
+        self,
+        *,
+        inject: bool = True,
+        as_name: Optional[str] = None,
+        auto_accept: bool = False,
+        policy=None,
     ):
         """
         Load the remote variable data.
@@ -1176,7 +1184,7 @@ class RemoteVarPointer:
             # Try to load from published data location first
             from .twin import Twin
 
-            twin = self._auto_load_twin(auto_accept=auto_accept)
+            twin = self._auto_load_twin(auto_accept=auto_accept, policy=policy)
             if twin is not None:
                 if inject:
                     import inspect
@@ -1297,7 +1305,7 @@ class RemoteVarPointer:
         elif self._last_error is not None:
             twin = None
         else:
-            twin = self._auto_load_twin()
+            twin = self._auto_load_twin(policy=None)
         if twin is not None and hasattr(twin, "_repr_html_"):
             return twin._repr_html_()  # type: ignore[attr-defined]
         return (

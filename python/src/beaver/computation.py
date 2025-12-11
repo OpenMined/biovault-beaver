@@ -1275,7 +1275,7 @@ class ComputationRequest:
                 if twin._is_trusted_loader(raw_private):
                     # Auto-load since owner is running the computation (implicit consent)
                     print(f"🔓 Auto-loading private data for '{twin.name}'...")
-                    loaded = twin.load(which="private", auto_accept=True)
+                    loaded = twin.load(which="private", auto_accept=False)
                     if loaded is None:
                         return None
                     return unwrap_for_computation(loaded)
@@ -1664,7 +1664,7 @@ class ComputationRequest:
                 if twin._is_trusted_loader(raw_public):
                     # Auto-load since this is for mock testing
                     print(f"🌍 Auto-loading public data for '{twin.name}'...")
-                    loaded = twin.load(which="public", auto_accept=True)
+                    loaded = twin.load(which="public", auto_accept=False)
                     if loaded is None:
                         return None
                     return unwrap_for_computation(loaded)

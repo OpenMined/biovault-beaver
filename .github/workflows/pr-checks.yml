@@ -68,6 +68,27 @@ jobs:
       - name: Run lib-support tests
         run: bash test_libs.sh
 
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: |
+          cd python
+          uv sync --extra dev
+
+      - name: Run security regression tests
+        run: bash test_security.sh
+
   notebook-01-hello-beaver:
     runs-on: ubuntu-latest
     steps:

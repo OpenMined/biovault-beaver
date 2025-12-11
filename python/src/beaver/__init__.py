@@ -204,6 +204,19 @@ def active_session():
     import os
     from pathlib import Path
 
+    def _auto_load_state(sess):
+        # Optional auto-restore of private state for convenience (opt-in)
+        flag = os.environ.get("BEAVER_AUTO_LOAD_STATE", "0").lower()
+        if flag in ("1", "true", "yes", "on"):
+            try:
+                sess.load()
+            except FileNotFoundError:
+                pass
+            except Exception as e:  # noqa: BLE001
+                if debug:
+                    print(f"[DEBUG] auto load_state failed: {e}")
+        return sess
+
     # Check if there's a session to load
     session_id = os.environ.get("BEAVER_SESSION_ID")
     session_json_path = Path(os.getcwd()) / "session.json"
@@ -214,7 +227,10 @@ def active_session():
     # Create context (will auto-detect data_dir from env)
     try:
         ctx = connect()
-        return ctx.active_session()
+        sess = ctx.active_session()
+        if sess:
+            return _auto_load_state(sess)
+        return None
     except Exception as e:
         print(f"⚠️  Failed to load active session: {e}")
         return None

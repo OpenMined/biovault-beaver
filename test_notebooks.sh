@@ -53,7 +53,13 @@ echo "=========================================="
 
 mkdir -p "$SANDBOX_ROOT"
 
-PARSED=$(CONFIG_PATH="$CONFIG_PATH" python3 - <<'PY'
+# Use uv run if python3 not available (e.g., in CI)
+PYTHON_CMD="python3"
+if ! command -v python3 &>/dev/null; then
+    PYTHON_CMD="uv run python"
+fi
+
+PARSED=$(CONFIG_PATH="$CONFIG_PATH" $PYTHON_CMD - <<'PY'
 import json, os
 cfg = json.load(open(os.environ["CONFIG_PATH"]))
 mode = cfg.get("mode", "parallel")
@@ -82,7 +88,7 @@ while IFS='|' read -r _ role nb timeout email; do
     EMAILS[idx]="$email"
     CLIENT_DIRS[idx]="$SANDBOX_ROOT/${email}"
     OUTPUTS[idx]="$(basename "${nb%.ipynb}")_output.ipynb"
-    ((idx++))
+    idx=$((idx + 1))
 done <<< "$RUN_LINES"
 RUN_COUNT=${#ROLES[@]}
 

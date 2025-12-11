@@ -32,7 +32,7 @@ class LiveVar(LiveMixin, RemoteData):
         print(p.value)  # {"epoch": 1, "status": "training", "acc": 0.85}
     """
 
-    value: Any = field(default=None, kw_only=True)
+    value: Any = field(default=None)
     var_type: str = field(default="LiveVar")
 
     def __post_init__(self):

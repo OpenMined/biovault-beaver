@@ -1,10 +1,14 @@
 #!/bin/bash
 set -e
-export UV_VENV_CLEAR=1
-uv venv
-uv pip install -e ./python
-uv pip install pytest
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
-# Run only pytest-compatible tests (not integration scripts)
-uv run pytest tests/test_live_sync_pytest.py tests/test_version.py -v
+cd "$SCRIPT_DIR/python"
+
+# Use UV_PYTHON if set (from CI), otherwise let uv pick
+PYTHON_ARG=""
+if [[ -n "$UV_PYTHON" ]]; then
+    PYTHON_ARG="--python $UV_PYTHON"
+fi
+
+# Sync dependencies and run all pytest tests
+uv sync $PYTHON_ARG --extra dev
+uv run pytest -v

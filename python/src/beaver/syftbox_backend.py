@@ -11,13 +11,25 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import beaver
 
 if TYPE_CHECKING:
     from .envelope import BeaverEnvelope
     from .session import SessionRequest
+
+
+class SenderVerificationError(Exception):
+    """Raised when envelope sender doesn't match cryptographically verified sender."""
+
+    def __init__(self, claimed_sender: str, verified_sender: str):
+        self.claimed_sender = claimed_sender
+        self.verified_sender = verified_sender
+        super().__init__(
+            f"Sender verification failed: envelope claims '{claimed_sender}' "
+            f"but crypto verified '{verified_sender}'"
+        )
 
 
 def _iso_now() -> str:
@@ -210,6 +222,57 @@ class SyftBoxBackend:
             data = bytes(self.storage.read_bytes(str(path)))
 
         return _deserialize_envelope(data)
+
+    def read_envelope_verified(
+        self, path: Path | str, verify: bool = True
+    ) -> Tuple[BeaverEnvelope, str, str]:
+        """
+        Read envelope and verify sender identity cryptographically.
+
+        Uses syftbox-sdk's read_with_shadow_metadata to get the verified sender
+        from the encrypted envelope's signature, then compares it to the
+        claimed sender in the envelope.
+
+        Args:
+            path: Path to .beaver file (in datasites/)
+            verify: If True, raise SenderVerificationError on mismatch.
+                   If False, just return the verified sender for inspection.
+
+        Returns:
+            Tuple of (envelope, verified_sender, fingerprint)
+            - envelope: Decrypted BeaverEnvelope
+            - verified_sender: Cryptographically verified sender identity
+            - fingerprint: Sender's identity key fingerprint (SHA256 hex)
+
+        Raises:
+            SenderVerificationError: If verify=True and claimed sender doesn't
+                                    match verified sender
+        """
+        path = Path(path)
+
+        if self.uses_crypto:
+            # Read with metadata to get verified sender
+            result = self.storage.read_with_shadow_metadata(str(path))
+            data = bytes(result.data)
+            verified_sender = result.sender
+            fingerprint = result.fingerprint
+        else:
+            # Plaintext read - no crypto verification possible
+            data = bytes(self.storage.read_bytes(str(path)))
+            verified_sender = "(plaintext)"
+            fingerprint = "(none)"
+
+        envelope = _deserialize_envelope(data)
+
+        # Verify sender if crypto is enabled and file was encrypted
+        if (
+            verify
+            and verified_sender not in ("(plaintext)", "(none)")
+            and envelope.sender != verified_sender
+        ):
+            raise SenderVerificationError(envelope.sender, verified_sender)
+
+        return envelope, verified_sender, fingerprint
 
     def write_bytes(
         self,

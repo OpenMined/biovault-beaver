@@ -170,6 +170,7 @@ except (ImportError, AttributeError):
 # SyftBox integration (optional - requires syftbox-sdk)
 try:
     from .syftbox_backend import (
+        SenderVerificationError,
         SyftBoxBackend,
         import_peer_bundle,
         provision_identity,
@@ -178,6 +179,7 @@ try:
     _SYFTBOX_AVAILABLE = True
 except ImportError:
     _SYFTBOX_AVAILABLE = False
+    SenderVerificationError = None  # type: ignore
     SyftBoxBackend = None  # type: ignore
     import_peer_bundle = None  # type: ignore
     provision_identity = None  # type: ignore
@@ -316,6 +318,7 @@ __all__ = [
     "RemoteVar",
     "RemoteVarRegistry",
     "RemoteVarView",
+    "SenderVerificationError",
     "Session",
     "SessionRequest",
     "SessionRequestsView",

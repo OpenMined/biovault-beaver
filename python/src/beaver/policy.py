@@ -246,3 +246,23 @@ STRICT_POLICY = BeaverPolicy(
     allow_functions=False,
     allow_classes={"builtins.dict", "builtins.list", "builtins.tuple"},
 )
+
+# Default policy: block functions, allow only common safe container/primitive types and Twin.
+DEFAULT_POLICY = BeaverPolicy(
+    verbose=False,
+    allow_functions=False,
+    allow_classes={
+        "builtins.dict",
+        "builtins.list",
+        "builtins.tuple",
+        "builtins.set",
+        "builtins.str",
+        "builtins.int",
+        "builtins.float",
+        "builtins.bool",
+        "builtins.bytes",
+        "builtins.NoneType",
+        "Twin",
+        "beaver.twin.Twin",
+    },
+)

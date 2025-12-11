@@ -94,3 +94,25 @@ def test_codebase_has_no_pickle_imports():
         if "import pickle" in text or "from pickle" in text:
             offenders.append(path)
     assert not offenders, f"pickle imports found: {offenders}"
+
+
+def test_unpack_blocks_function_without_policy():
+    """Unpacking a function payload should be blocked by default-deny policy."""
+
+    def evil():
+        return "bad"
+
+    env = runtime.pack(evil, sender="attacker")
+    with pytest.raises(runtime.SecurityError):
+        runtime.unpack(env)
+
+
+def test_auto_accept_does_not_run_untrusted_loader():
+    payload = {
+        "_trusted_loader": True,
+        "deserializer_src": "def load(p):\n    return __import__('os').getpid()",
+        "path": "/tmp/fake.bin",
+    }
+    env = BeaverEnvelope(payload=runtime.pack(payload).payload)
+    with pytest.raises(runtime.SecurityError):
+        runtime.unpack(env, auto_accept=True)

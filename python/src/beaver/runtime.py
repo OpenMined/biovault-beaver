@@ -29,6 +29,7 @@ class SecurityError(Exception):
 
 from . import lib_support
 from .envelope import BeaverEnvelope
+from .policy import DEFAULT_POLICY, BeaverPolicy
 
 if TYPE_CHECKING:
     from .session import Session
@@ -449,6 +450,36 @@ def _analyze_loader_source(src: str, allowed_imports: Optional[set[str]] = None)
                         raise SecurityError(f"Blocked dynamic import: {modname}")
 
 
+def _exec_restricted_loader(src: str, scope: dict) -> dict:
+    """Execute loader code in a RestrictedPython sandbox."""
+    try:
+        from RestrictedPython import compile_restricted
+        from RestrictedPython.Eval import default_guarded_getitem, default_guarded_getiter
+        from RestrictedPython.Guards import (
+            full_write_guard,
+            guarded_iter_unpack_sequence,
+            guarded_unpack_sequence,
+            safe_builtins,
+            safer_getattr,
+        )
+    except Exception as e:  # pragma: no cover - import error path
+        raise SecurityError(f"RestrictedPython not available: {e}") from e
+
+    bytecode = compile_restricted(src, filename="<trusted_loader>", mode="exec")
+    restricted_globals: dict = {
+        "__builtins__": safe_builtins,
+        "_getattr_": safer_getattr,
+        "_getitem_": default_guarded_getitem,
+        "_getiter_": default_guarded_getiter,
+        "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
+        "_unpack_sequence_": guarded_unpack_sequence,
+        "_write_": full_write_guard,
+    }
+    restricted_globals.update(scope)
+    exec(bytecode, restricted_globals, restricted_globals)
+    return restricted_globals
+
+
 def _prepare_for_sending(
     obj: Any,
     *,
@@ -733,7 +764,8 @@ def pack(
         recipients=recipients,
     )
 
-    fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
+    effective_policy = policy or DEFAULT_POLICY
+    fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=effective_policy)
 
     # Register Twin type so it can be deserialized
     from .twin import Twin
@@ -833,7 +865,8 @@ def unpack(
         backend: Optional SyftBoxBackend for reading encrypted artifact files
     """
     _install_builtin_aliases()
-    fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
+    effective_policy: BeaverPolicy = policy or DEFAULT_POLICY
+    fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=effective_policy)
 
     # Register Twin type so it can be deserialized
     from .twin import Twin
@@ -844,7 +877,10 @@ def unpack(
     if envelope.payload.startswith(b"\x80"):
         raise SecurityError("Pickle payloads are blocked.")
 
-    obj = fory.loads(envelope.payload)
+    try:
+        obj = fory.loads(envelope.payload)
+    except Exception as e:
+        raise SecurityError(f"Deserialization blocked by policy: {e}") from e
     obj = _resolve_trusted_loader(obj, auto_accept=auto_accept, backend=backend)
     return obj
 
@@ -989,28 +1025,8 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         allowed_imports = {"numpy", "pandas", "anndata", "pathlib"}
         _analyze_loader_source(src, allowed_imports=allowed_imports)
 
-        # Restrict builtins during execution
-        safe_builtins = {
-            "len": len,
-            "range": range,
-            "str": str,
-            "int": int,
-            "float": float,
-            "bool": bool,
-            "dict": dict,
-            "list": list,
-            "tuple": tuple,
-            "set": set,
-            "bytes": bytes,
-            "object": object,
-            "type": type,
-            "isinstance": isinstance,
-            "print": print,
-        }
-        scope["__builtins__"] = safe_builtins
-
         try:
-            exec(src, scope, scope)
+            scope = _exec_restricted_loader(src, scope)
         except Exception as e:
             raise SecurityError(f"Trusted loader execution blocked: {e}") from e
         # Exclude TrustedLoader class and imported modules - we want the actual deserializer function

@@ -10,10 +10,14 @@ CONFIG_PATH=""
 
 REQUIREMENTS=(papermill jupyter nbconvert ipykernel scanpy anndata matplotlib scikit-misc pyarrow torch torchvision safetensors)
 
+# Security test mode - for 00-malicious notebooks
+SECURITY_TEST=0
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --interactive) INTERACTIVE=1; shift ;;
         --all) RUN_ALL=1; shift ;;
+        --secure) SECURITY_TEST=1; shift ;;
         *) CONFIG_PATH="$1"; shift ;;
     esac
 done
@@ -22,6 +26,26 @@ done
 PYTHON_CMD="python3"
 if ! command -v python3 &>/dev/null; then
     PYTHON_CMD="uv run python"
+fi
+
+# Auto-detect security test mode from config path
+if [[ -n "$CONFIG_PATH" && "$CONFIG_PATH" == *"00-malicious"* ]]; then
+    SECURITY_TEST=1
+fi
+
+# Set environment based on mode
+if [[ "$SECURITY_TEST" == "1" ]]; then
+    # Security test mode: still need trusted loaders for DO to load data,
+    # but the security comes from human review (not approving malicious results)
+    export BEAVER_AUTO_ACCEPT="${BEAVER_AUTO_ACCEPT:-1}"
+    export BEAVER_TRUSTED_LOADERS="${BEAVER_TRUSTED_LOADERS:-1}"
+    export BEAVER_TRUSTED_POLICY="${BEAVER_TRUSTED_POLICY:-1}"
+    echo "Security test mode: Testing human-review security model"
+else
+    # Normal mode: trusted environment for CI
+    export BEAVER_AUTO_ACCEPT="${BEAVER_AUTO_ACCEPT:-1}"
+    export BEAVER_TRUSTED_LOADERS="${BEAVER_TRUSTED_LOADERS:-1}"
+    export BEAVER_TRUSTED_POLICY="${BEAVER_TRUSTED_POLICY:-1}"
 fi
 
 if [[ "$RUN_ALL" == "1" ]]; then

@@ -92,6 +92,11 @@ class BeaverPolicy:
 
         return cls
 
+    # pyfory hook name
+    def authorize_instantiation(self, cls: type, is_local: bool = False) -> Optional[type]:
+        """Alias for validate_class expected by serializers."""
+        return self.validate_class(cls, is_local=is_local)
+
     def validate_function(self, func: Callable, is_local: bool = False) -> Optional[Callable]:
         """
         Called before deserializing a function.
@@ -237,6 +242,10 @@ class BeaverPolicy:
         # For now, just log and pass through
         return state
 
+    # Alias expected by some serializers
+    def intercept_setstate(self, obj: Any, state: Any) -> Any:
+        return self.validate_setstate(obj, state)
+
 
 # Default policy instances
 PERMISSIVE_POLICY = BeaverPolicy(verbose=False, allow_functions=True)
@@ -245,4 +254,40 @@ STRICT_POLICY = BeaverPolicy(
     verbose=True,
     allow_functions=False,
     allow_classes={"builtins.dict", "builtins.list", "builtins.tuple"},
+)
+
+# Default policy: block functions; allow a vetted set of common data containers
+DEFAULT_POLICY = BeaverPolicy(
+    verbose=False,
+    allow_functions=False,
+    allow_classes={
+        "builtins.dict",
+        "builtins.list",
+        "builtins.tuple",
+        "builtins.set",
+        "builtins.str",
+        "builtins.int",
+        "builtins.float",
+        "builtins.bool",
+        "builtins.bytes",
+        "builtins.NoneType",
+        "Twin",
+        "beaver.twin.Twin",
+        "numpy.ndarray",
+        "numpy.int64",
+        "numpy.int32",
+        "numpy.float64",
+        "numpy.float32",
+        "pandas.core.frame.DataFrame",
+        "pandas.core.series.Series",
+        "pandas.core.indexes.base.Index",
+        "pandas.core.internals.managers.BlockManager",
+    },
+)
+
+# Trusted policy: allow functions/classes (for explicitly trusted/local contexts)
+TRUSTED_POLICY = BeaverPolicy(
+    verbose=False,
+    allow_functions=True,
+    allow_classes=None,
 )

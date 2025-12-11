@@ -559,32 +559,38 @@ class Session:
 
     def _setup_paths(self) -> None:
         """Setup local and peer folder paths."""
-        if self._context is None or self._context._backend is None:
+        if self._context is None:
             return
 
-        backend = self._context._backend
+        if self._context._backend is not None:
+            backend = self._context._backend
 
-        # Our folder: datasites/<our_email>/shared/biovault/sessions/<session_id>/
-        self._local_path = (
-            backend.data_dir
-            / "datasites"
-            / self.owner
-            / "shared"
-            / "biovault"
-            / "sessions"
-            / self.session_id
-        )
+            # Our folder: datasites/<our_email>/shared/biovault/sessions/<session_id>/
+            self._local_path = (
+                backend.data_dir
+                / "datasites"
+                / self.owner
+                / "shared"
+                / "biovault"
+                / "sessions"
+                / self.session_id
+            )
 
-        # Peer's folder: datasites/<peer_email>/shared/biovault/sessions/<session_id>/
-        self._peer_path = (
-            backend.data_dir
-            / "datasites"
-            / self.peer
-            / "shared"
-            / "biovault"
-            / "sessions"
-            / self.session_id
-        )
+            # Peer's folder: datasites/<peer_email>/shared/biovault/sessions/<session_id>/
+            self._peer_path = (
+                backend.data_dir
+                / "datasites"
+                / self.peer
+                / "shared"
+                / "biovault"
+                / "sessions"
+                / self.session_id
+            )
+        else:
+            # Local filesystem mode - use inbox_path as base
+            base_path = self._context.inbox_path / "sessions" / self.session_id
+            self._local_path = base_path
+            self._peer_path = base_path  # Same folder in local mode
 
         # Create our local folder
         self._local_path.mkdir(parents=True, exist_ok=True)
@@ -594,8 +600,9 @@ class Session:
         (self._local_path / "data").mkdir(parents=True, exist_ok=True)
         (self._peer_path / "data").mkdir(parents=True, exist_ok=True)
 
-        # Create permission file (syft.pub.yaml)
-        self._write_permission_file()
+        # Create permission file (syft.pub.yaml) - only for backend mode
+        if self._context._backend is not None:
+            self._write_permission_file()
 
     def _write_permission_file(self) -> None:
         """Write syft.pub.yaml permission file for the session folder."""

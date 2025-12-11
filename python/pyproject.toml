@@ -43,7 +43,8 @@ format = ["pyarrow"]
 lib-support = [
     "numpy",
     "pandas>=1.3.0",
-    "pyarrow",
+    # pyarrow 22.x crashes on pandas Series parquet read in CI; pin below 22 for stability
+    "pyarrow>=12.0.0,<22.0.0",
     "pillow",
     "matplotlib",
     "safetensors",

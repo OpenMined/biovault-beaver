@@ -11,6 +11,12 @@ dev:
     dest: 03-neural-network-do.ipynb
   - source: 03-neural-network-ds.ipynb
     dest: 03-neural-network-ds.ipynb
+  - source: 04-sessions-do-publish.ipynb
+    dest: 04-sessions-do-publish.ipynb
+  - source: 04-sessions-ds.ipynb
+    dest: 04-sessions-ds.ipynb
+  - source: 04-sessions-do-receive.ipynb
+    dest: 04-sessions-do-receive.ipynb
   - source: 04-gwas-do.ipynb
     dest: 04-gwas-do.ipynb
   - source: 04-gwas-ds.ipynb
@@ -29,6 +35,12 @@ prod:
     dest: 03-neural-network-do.ipynb
   - source: 03-neural-network-ds.ipynb
     dest: 03-neural-network-ds.ipynb
+  - source: 04-sessions-do-publish.ipynb
+    dest: 04-sessions-do-publish.ipynb
+  - source: 04-sessions-ds.ipynb
+    dest: 04-sessions-ds.ipynb
+  - source: 04-sessions-do-receive.ipynb
+    dest: 04-sessions-do-receive.ipynb
   - source: 04-gwas-do.ipynb
     dest: 04-gwas-do.ipynb
   - source: 04-gwas-ds.ipynb

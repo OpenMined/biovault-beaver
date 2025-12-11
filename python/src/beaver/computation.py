@@ -1412,6 +1412,12 @@ class ComputationRequest:
         resolved_args = tuple(resolve_twin_ref(a) for a in self.args)
         resolved_kwargs = {k: resolve_twin_ref(v) for k, v in self.kwargs.items()}
 
+        # Also resolve function references (TwinFunc callbacks)
+        from .twin_func import resolve_func_ref
+
+        resolved_args = tuple(resolve_func_ref(a, context) for a in resolved_args)
+        resolved_kwargs = {k: resolve_func_ref(v, context) for k, v in resolved_kwargs.items()}
+
         # Replace Twin arguments with their private sides (preferring local Twin)
         private_args = []
         for arg in resolved_args:
@@ -1785,6 +1791,12 @@ class ComputationRequest:
         resolved_args = tuple(resolve_twin_ref(a) for a in self.args)
         resolved_kwargs = {k: resolve_twin_ref(v) for k, v in self.kwargs.items()}
 
+        # Also resolve function references (TwinFunc callbacks)
+        from .twin_func import resolve_func_ref
+
+        resolved_args = tuple(resolve_func_ref(a, context) for a in resolved_args)
+        resolved_kwargs = {k: resolve_func_ref(v, context) for k, v in resolved_kwargs.items()}
+
         # Replace Twin arguments with their public sides (preferring local Twin)
         mock_args = []
         for arg in resolved_args:
@@ -2153,6 +2165,12 @@ class ComputationRequest:
 
         resolved_args = tuple(resolve_twin_ref(a) for a in self.args)
         resolved_kwargs = {k: resolve_twin_ref(v) for k, v in self.kwargs.items()}
+
+        # Also resolve function references (TwinFunc callbacks)
+        from .twin_func import resolve_func_ref
+
+        resolved_args = tuple(resolve_func_ref(a, context) for a in resolved_args)
+        resolved_kwargs = {k: resolve_func_ref(v, context) for k, v in resolved_kwargs.items()}
 
         # Build private args (similar to run_mock but using private data)
         private_args = []

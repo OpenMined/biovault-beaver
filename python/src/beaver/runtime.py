@@ -18,24 +18,14 @@ from uuid import uuid4
 
 try:
     import pyfory
-except ImportError:
-    import pickle
+except ImportError as e:
+    raise ImportError(
+        "pyfory is required for beaver serialization; pickle fallback is disabled for security."
+    ) from e
 
-    # Minimal stub for environments without pyfory (tests/dev)
-    class _StubFory:
-        def __init__(self, *args, **kwargs):
-            pass
 
-        def register_type(self, *_args, **_kwargs):
-            return None
-
-        def dumps(self, obj):
-            return pickle.dumps(obj)
-
-        def loads(self, payload):
-            return pickle.loads(payload)
-
-    pyfory = types.SimpleNamespace(Fory=_StubFory)
+class SecurityError(Exception):
+    """Raised when a security policy violation is detected."""
 
 from . import lib_support
 from .envelope import BeaverEnvelope
@@ -384,6 +374,79 @@ def _sanitize_for_serialization(obj: Any) -> Any:
     if any(mod in type_name for mod in ("scanpy", "anndata", "sklearn")):
         return {"_complex_object": True, "type": type_name}
     return obj
+
+
+def _validate_artifact_path(path: str | Path, *, backend=None) -> Path:
+    """Ensure artifact path stays within an allowlisted base directory."""
+    candidate = Path(path)
+    if ".." in candidate.parts:
+        raise SecurityError(f"Path traversal detected for artifact: {path}")
+    bases = []
+    if backend and getattr(backend, "data_dir", None):
+        bases.append(Path(backend.data_dir))
+    bases.append(Path.cwd())
+    bases.append(Path(tempfile.gettempdir()))
+
+    resolved_candidate = candidate.resolve()
+    for base in bases:
+        resolved_base = base.resolve()
+        try:
+            resolved_candidate.relative_to(resolved_base)
+            break
+        except ValueError:
+            continue
+    else:
+        raise SecurityError(f"Path traversal detected for artifact: {path}")
+
+    if resolved_candidate.is_symlink():
+        target = resolved_candidate.readlink().resolve()
+        for base in bases:
+            try:
+                target.relative_to(base.resolve())
+                break
+            except ValueError:
+                continue
+        else:
+            raise SecurityError(f"Symlink escape detected for artifact: {path}")
+    return resolved_candidate
+
+
+def _analyze_loader_source(src: str, allowed_imports: Optional[set[str]] = None) -> None:
+    """Static analysis of loader code to block dangerous patterns."""
+    import ast
+
+    dangerous_names = {"__import__", "eval", "exec", "compile", "open"}
+    dangerous_modules = {"os", "subprocess", "sys", "importlib", "builtins"}
+    allowed_imports = allowed_imports or set()
+
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            mods = []
+            if isinstance(node, ast.Import):
+                mods = [alias.name.split(".")[0] for alias in node.names]
+            elif node.module:
+                mods = [node.module.split(".")[0]]
+            for mod in mods:
+                if mod in dangerous_modules:
+                    raise SecurityError(f"Blocked import in trusted loader: {mod}")
+                if allowed_imports and mod not in allowed_imports:
+                    raise SecurityError(f"Import not allowed in trusted loader: {mod}")
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            name = None
+            if isinstance(fn, ast.Name):
+                name = fn.id
+            elif isinstance(fn, ast.Attribute):
+                name = fn.attr
+            if name in dangerous_names:
+                raise SecurityError(f"Blocked call in trusted loader: {name}")
+            if isinstance(fn, ast.Name) and fn.id == "__import__":
+                # Try to resolve the first argument if constant
+                if node.args and isinstance(node.args[0], ast.Constant):
+                    modname = str(node.args[0].value).split(".")[0]
+                    if modname in dangerous_modules:
+                        raise SecurityError(f"Blocked dynamic import: {modname}")
 
 
 def _prepare_for_sending(
@@ -777,6 +840,10 @@ def unpack(
 
     fory.register_type(Twin)
 
+    # Block pickle payloads outright (magic 0x80 precedes pickle protocol)
+    if envelope.payload.startswith(b"\x80"):
+        raise SecurityError("Pickle payloads are blocked.")
+
     obj = fory.loads(envelope.payload)
     obj = _resolve_trusted_loader(obj, auto_accept=auto_accept, backend=backend)
     return obj
@@ -872,6 +939,10 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
                     # Always use translated path - file should be synced to our local view
                     data_path = translated
 
+        # Validate artifact path to prevent traversal/symlink escapes
+        if data_path:
+            _validate_artifact_path(data_path, backend=backend)
+
         preview = "\n".join(src.strip().splitlines()[:5])
         if not auto_accept:
             resp = (
@@ -914,7 +985,34 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         if meta is not None:
             scope["_beaver_meta"] = meta
 
-        exec(src, scope, scope)
+        # Static analysis to block dangerous imports/calls
+        allowed_imports = {"numpy", "pandas", "anndata", "pathlib"}
+        _analyze_loader_source(src, allowed_imports=allowed_imports)
+
+        # Restrict builtins during execution
+        safe_builtins = {
+            "len": len,
+            "range": range,
+            "str": str,
+            "int": int,
+            "float": float,
+            "bool": bool,
+            "dict": dict,
+            "list": list,
+            "tuple": tuple,
+            "set": set,
+            "bytes": bytes,
+            "object": object,
+            "type": type,
+            "isinstance": isinstance,
+            "print": print,
+        }
+        scope["__builtins__"] = safe_builtins
+
+        try:
+            exec(src, scope, scope)
+        except Exception as e:
+            raise SecurityError(f"Trusted loader execution blocked: {e}") from e
         # Exclude TrustedLoader class and imported modules - we want the actual deserializer function
         excluded = {
             TrustedLoader,

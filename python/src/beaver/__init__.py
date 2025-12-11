@@ -11,6 +11,7 @@ from .computation import (
 from .datasets import DatasetRegistry
 from .envelope import BeaverEnvelope
 from .lib_support import register_builtin_loader
+from .live_var import LiveVar
 from .mappings import MappingStore
 from .policy import (
     PERMISSIVE_POLICY,
@@ -42,6 +43,7 @@ from .runtime import (
 )
 from .session import Session, SessionRequest, SessionRequestsView
 from .twin import CapturedFigure, Twin
+from .twin_func import TwinFunc, func_to_ref, resolve_func_ref
 from .twin_result import TwinComputationResult
 
 # Debug flag for beaver output
@@ -202,6 +204,19 @@ def active_session():
     import os
     from pathlib import Path
 
+    def _auto_load_state(sess):
+        # Optional auto-restore of private state for convenience (opt-in)
+        flag = os.environ.get("BEAVER_AUTO_LOAD_STATE", "0").lower()
+        if flag in ("1", "true", "yes", "on"):
+            try:
+                sess.load()
+            except FileNotFoundError:
+                pass
+            except Exception as e:  # noqa: BLE001
+                if debug:
+                    print(f"[DEBUG] auto load_state failed: {e}")
+        return sess
+
     # Check if there's a session to load
     session_id = os.environ.get("BEAVER_SESSION_ID")
     session_json_path = Path(os.getcwd()) / "session.json"
@@ -212,7 +227,10 @@ def active_session():
     # Create context (will auto-detect data_dir from env)
     try:
         ctx = connect()
-        return ctx.active_session()
+        sess = ctx.active_session()
+        if sess:
+            return _auto_load_state(sess)
+        return None
     except Exception as e:
         print(f"⚠️  Failed to load active session: {e}")
         return None

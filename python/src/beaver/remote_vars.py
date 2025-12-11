@@ -362,10 +362,143 @@ class RemoteVarRegistry:
 
         is_twin = isinstance(obj, Twin)
 
+        # Check if this is a LiveVar
+        from .live_var import LiveVar
+
+        is_live_var = isinstance(obj, LiveVar)
+
+        # Check if this is a TwinFunc or callable
+        from .twin_func import TwinFunc, register_func
+
+        is_twin_func = isinstance(obj, TwinFunc)
+        is_callable = callable(obj) and not is_twin_func and not is_twin and not is_live_var
+
+        # Handle plain callables - register and store as func reference
+        if is_callable:
+            func_id = register_func(obj, self.owner, name)
+            remote_var = RemoteVar(
+                name=name,
+                owner=self.owner,
+                var_type="function",
+                _stored_value={
+                    "_beaver_func_ref": True,
+                    "func_id": func_id,
+                    "owner": self.owner,
+                    "name": name,
+                },
+                deps={},
+            )
+            remote_var._local_func = obj  # Keep local reference
+
+            self.vars[name] = remote_var
+            self._save()
+
+            print(f"📢 Published function '{name}' (callback)")
+            return remote_var
+
         # Create metadata
         from .runtime import _summarize
 
         data_location = None
+
+        if is_twin_func:
+            # For TwinFunc, store the reference dict
+            remote_var = RemoteVar(
+                name=name,
+                owner=self.owner,
+                var_type="TwinFunc",
+                _stored_value=obj.to_ref(),  # Store as reference dict
+                deps={},
+            )
+            # Also store the actual TwinFunc for local resolution
+            remote_var._twin_func = obj
+
+            self.vars[name] = remote_var
+            self._save()
+
+            print(f"📢 Published TwinFunc '{name}' (callback reference)")
+            return remote_var
+
+        if is_live_var:
+            # For LiveVar, serialize to shared data directory like Twin
+            from .runtime import pack, write_envelope
+
+            # Set owner and name on the LiveVar
+            obj.owner = self.owner
+            obj.name = name
+
+            public_data_dir = self.registry_path.parent / "data"
+            public_data_dir.mkdir(parents=True, exist_ok=True)
+
+            # Determine backend and recipients for encryption
+            backend = None
+            recipients = None
+            if self._context and hasattr(self._context, "_backend") and self._context._backend:
+                backend = self._context._backend
+                if backend.uses_crypto and self.peer:
+                    recipients = [self.peer]
+
+            # Pack and write LiveVar
+            env = pack(
+                obj,
+                sender=self.owner,
+                name=name,
+                artifact_dir=public_data_dir,
+                backend=backend,
+                recipients=recipients,
+            )
+
+            # Write envelope (encrypted if backend available)
+            if backend and backend.uses_crypto and recipients:
+                import base64
+                import json as json_mod  # noqa: PLC0415
+
+                record = {
+                    "version": env.version,
+                    "envelope_id": env.envelope_id,
+                    "sender": env.sender,
+                    "created_at": env.created_at,
+                    "name": env.name,
+                    "inputs": env.inputs,
+                    "outputs": env.outputs,
+                    "requirements": env.requirements,
+                    "manifest": env.manifest,
+                    "reply_to": env.reply_to,
+                    "payload_b64": base64.b64encode(env.payload).decode("ascii"),
+                }
+                content = json_mod.dumps(record, indent=2).encode("utf-8")
+                data_path = public_data_dir / env.filename()
+                backend.storage.write_with_shadow(
+                    str(data_path),
+                    content,
+                    recipients=recipients,
+                    hint="beaver-envelope",
+                )
+                data_location = str(data_path)
+            else:
+                data_path = write_envelope(env, out_dir=public_data_dir)
+                data_location = str(data_path)
+
+            remote_var = RemoteVar(
+                name=name,
+                owner=self.owner,
+                var_type="LiveVar",
+                data_location=data_location,
+                _stored_value=None,
+                deps={},
+            )
+            remote_var._live_var_reference = obj
+
+            # Store registry on LiveVar for auto-updates
+            if hasattr(obj, "_live_enabled") and obj._live_enabled:
+                obj._published_registry = self
+                obj._published_name = name
+
+            self.vars[name] = remote_var
+            self._save()
+
+            print(f"📢 Published LiveVar '{name}' (available at: {data_location})")
+            return remote_var
 
         if is_twin:
             # For Twin, publish the public side to shared location
@@ -509,7 +642,7 @@ class RemoteVarRegistry:
 
     def update(self, name: str):
         """
-        Re-publish a Twin (e.g., after live sync detects changes).
+        Re-publish a Twin or LiveVar (e.g., after live sync detects changes).
 
         Args:
             name: Variable name to update
@@ -518,6 +651,13 @@ class RemoteVarRegistry:
             return
 
         remote_var = self.vars[name]
+
+        # Check for LiveVar reference
+        if hasattr(remote_var, "_live_var_reference"):
+            live_var = remote_var._live_var_reference
+            if live_var is not None:
+                self._update_live_var(name, live_var, remote_var)
+                return
 
         # Only update if we have a Twin reference
         if not hasattr(remote_var, "_twin_reference"):
@@ -596,6 +736,67 @@ class RemoteVarRegistry:
                 "payload_b64": base64.b64encode(env.payload).decode("ascii"),
             }
             content = json.dumps(record, indent=2).encode("utf-8")
+            data_path = public_data_dir / env.filename()
+            backend.storage.write_with_shadow(
+                str(data_path),
+                content,
+                recipients=recipients,
+                hint="beaver-envelope",
+            )
+        else:
+            data_path = write_envelope(env, out_dir=public_data_dir)
+
+        # Update metadata
+        remote_var.data_location = str(data_path)
+        remote_var.updated_at = _iso_now()
+
+        self._save()
+
+    def _update_live_var(self, name: str, live_var, remote_var: RemoteVar):
+        """Re-publish a LiveVar after value change."""
+        from .runtime import pack, write_envelope
+
+        # Write to same location (overwrite)
+        public_data_dir = self.registry_path.parent / "data"
+        public_data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Determine backend and recipients for encryption
+        backend = None
+        recipients = None
+        if self._context and hasattr(self._context, "_backend") and self._context._backend:
+            backend = self._context._backend
+            if backend.uses_crypto and self.peer:
+                recipients = [self.peer]
+
+        # Pack and write
+        env = pack(
+            live_var,
+            sender=self.owner,
+            name=name,
+            artifact_dir=public_data_dir,
+            backend=backend,
+            recipients=recipients,
+        )
+
+        # Write envelope (encrypted if backend available)
+        if backend and backend.uses_crypto and recipients:
+            import base64
+            import json as json_mod
+
+            record = {
+                "version": env.version,
+                "envelope_id": env.envelope_id,
+                "sender": env.sender,
+                "created_at": env.created_at,
+                "name": env.name,
+                "inputs": env.inputs,
+                "outputs": env.outputs,
+                "requirements": env.requirements,
+                "manifest": env.manifest,
+                "reply_to": env.reply_to,
+                "payload_b64": base64.b64encode(env.payload).decode("ascii"),
+            }
+            content = json_mod.dumps(record, indent=2).encode("utf-8")
             data_path = public_data_dir / env.filename()
             backend.storage.write_with_shadow(
                 str(data_path),
@@ -1176,6 +1377,105 @@ class RemoteVarPointer:
             The loaded object (Twin, simple value, or pointer if not available)
         """
         var_name = as_name or self.remote_var.name
+
+        # Check if this is a function/TwinFunc
+        if self.remote_var.var_type in ("TwinFunc", "function"):
+            from .twin_func import TwinFunc
+
+            # Create TwinFunc from stored reference
+            if self.remote_var._stored_value:
+                twin_func = TwinFunc.from_ref(self.remote_var._stored_value)
+                if inject:
+                    import inspect
+
+                    frame = inspect.currentframe()
+                    if frame and frame.f_back:
+                        caller_globals = frame.f_back.f_globals
+                        caller_globals[var_name] = twin_func
+                        print(f"✓ Loaded function '{var_name}' (callback reference)")
+                return twin_func
+            else:
+                print(f"⚠️  Function '{var_name}' has no stored value")
+                return None
+
+        # Check if this is a LiveVar
+        if self.remote_var.var_type == "LiveVar":
+            from .live_var import LiveVar
+
+            # Try to load from published data location
+            if self.remote_var.data_location:
+                try:
+                    from .runtime import read_envelope
+
+                    stored_path = Path(self.remote_var.data_location)
+                    filename = stored_path.name
+
+                    # Use our local view's data directory
+                    if hasattr(self.view, "data_dir"):
+                        data_path = Path(self.view.data_dir) / filename
+                    elif hasattr(self.view, "registry_path"):
+                        data_path = Path(self.view.registry_path).parent / "data" / filename
+                    else:
+                        data_path = stored_path
+
+                    # Try by name if not found
+                    if not data_path.exists() and hasattr(self.view, "data_dir"):
+                        by_name = Path(self.view.data_dir) / f"{self.remote_var.name}.beaver"
+                        if by_name.exists():
+                            data_path = by_name
+
+                    if data_path.exists():
+                        # Read envelope (handle encryption if needed)
+                        backend = None
+                        if hasattr(self.view, "context") and self.view.context:
+                            ctx = self.view.context
+                            if hasattr(ctx, "_backend") and ctx._backend:
+                                backend = ctx._backend
+                                if backend.uses_crypto:
+                                    raw = bytes(backend.storage.read_with_shadow(str(data_path)))
+                                    import base64
+
+                                    from .envelope import BeaverEnvelope
+
+                                    record = json.loads(raw.decode("utf-8"))
+                                    payload = base64.b64decode(record["payload_b64"])
+                                    env = BeaverEnvelope(
+                                        version=record.get("version", 1),
+                                        envelope_id=record.get("envelope_id"),
+                                        sender=record.get("sender", "unknown"),
+                                        created_at=record.get("created_at"),
+                                        name=record.get("name"),
+                                        inputs=record.get("inputs", []),
+                                        outputs=record.get("outputs", []),
+                                        requirements=record.get("requirements", []),
+                                        manifest=record.get("manifest", {}),
+                                        reply_to=record.get("reply_to"),
+                                        payload=payload,
+                                    )
+                                else:
+                                    env = read_envelope(data_path)
+                            else:
+                                env = read_envelope(data_path)
+                        else:
+                            env = read_envelope(data_path)
+
+                        live_var = env.load(inject=False, auto_accept=auto_accept, backend=backend)
+                        if isinstance(live_var, LiveVar):
+                            if inject:
+                                import inspect
+
+                                frame = inspect.currentframe()
+                                if frame and frame.f_back:
+                                    caller_globals = frame.f_back.f_globals
+                                    caller_globals[var_name] = live_var
+                                    print(f"✓ Loaded LiveVar '{var_name}' from published location")
+                            return live_var
+                except Exception as e:
+                    print(f"⚠️  Could not load LiveVar '{var_name}': {e}")
+                    return None
+
+            print(f"⚠️  LiveVar '{var_name}' not available")
+            return None
 
         # Check if this is a Twin type
         is_twin = self.remote_var.var_type.startswith("Twin[")

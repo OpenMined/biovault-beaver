@@ -18,14 +18,28 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Use uv run if python3 not available (e.g., in CI)
+PYTHON_CMD="python3"
+if ! command -v python3 &>/dev/null; then
+    PYTHON_CMD="uv run python"
+fi
+
 if [[ "$RUN_ALL" == "1" ]]; then
     echo "=========================================="
     echo "Running ALL notebook tests"
     echo "=========================================="
     OVERALL_RET=0
+    SKIPPED=0
     for config in "$ROOT_DIR"/notebooks/*.json; do
         echo ""
         echo ">>> $config"
+        # Check if test should be skipped
+        if $PYTHON_CMD -c "import json; c=json.load(open('$config')); exit(0 if c.get('skip') else 1)" 2>/dev/null; then
+            SKIP_REASON=$($PYTHON_CMD -c "import json; print(json.load(open('$config')).get('skip_reason', 'marked as skip'))")
+            echo "<<< SKIPPED: $SKIP_REASON"
+            SKIPPED=$((SKIPPED + 1))
+            continue
+        fi
         if "$0" "$config"; then
             echo "<<< PASSED: $config"
         else
@@ -35,9 +49,9 @@ if [[ "$RUN_ALL" == "1" ]]; then
     done
     echo ""
     if [[ "$OVERALL_RET" == "0" ]]; then
-        echo "✓ ALL NOTEBOOK SUITES PASSED"
+        echo "✓ ALL NOTEBOOK SUITES PASSED ($SKIPPED skipped)"
     else
-        echo "✗ SOME NOTEBOOK SUITES FAILED"
+        echo "✗ SOME NOTEBOOK SUITES FAILED ($SKIPPED skipped)"
     fi
     exit "$OVERALL_RET"
 fi
@@ -52,12 +66,6 @@ echo "Config: $CONFIG_PATH"
 echo "=========================================="
 
 mkdir -p "$SANDBOX_ROOT"
-
-# Use uv run if python3 not available (e.g., in CI)
-PYTHON_CMD="python3"
-if ! command -v python3 &>/dev/null; then
-    PYTHON_CMD="uv run python"
-fi
 
 PARSED=$(CONFIG_PATH="$CONFIG_PATH" $PYTHON_CMD - <<'PY'
 import json, os

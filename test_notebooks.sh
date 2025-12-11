@@ -5,17 +5,44 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SANDBOX_ROOT="$ROOT_DIR/sandbox"
 ENV_DIR="$ROOT_DIR/.test-notebooks"
 INTERACTIVE=0
+RUN_ALL=0
 CONFIG_PATH=""
 
-REQUIREMENTS=(papermill jupyter nbconvert ipykernel scanpy anndata matplotlib scikit-misc pyarrow)
+REQUIREMENTS=(papermill jupyter nbconvert ipykernel scanpy anndata matplotlib scikit-misc pyarrow torch torchvision safetensors)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --interactive) INTERACTIVE=1; shift ;;
+        --all) RUN_ALL=1; shift ;;
         *) CONFIG_PATH="$1"; shift ;;
     esac
 done
-[[ -z "$CONFIG_PATH" ]] && { echo "Usage: $0 <config.json> [--interactive]"; exit 1; }
+
+if [[ "$RUN_ALL" == "1" ]]; then
+    echo "=========================================="
+    echo "Running ALL notebook tests"
+    echo "=========================================="
+    OVERALL_RET=0
+    for config in "$ROOT_DIR"/notebooks/*.json; do
+        echo ""
+        echo ">>> $config"
+        if "$0" "$config"; then
+            echo "<<< PASSED: $config"
+        else
+            echo "<<< FAILED: $config"
+            OVERALL_RET=1
+        fi
+    done
+    echo ""
+    if [[ "$OVERALL_RET" == "0" ]]; then
+        echo "✓ ALL NOTEBOOK SUITES PASSED"
+    else
+        echo "✗ SOME NOTEBOOK SUITES FAILED"
+    fi
+    exit "$OVERALL_RET"
+fi
+
+[[ -z "$CONFIG_PATH" ]] && { echo "Usage: $0 <config.json> [--interactive] [--all]"; exit 1; }
 CONFIG_PATH="$(realpath "$CONFIG_PATH")"
 [[ ! -f "$CONFIG_PATH" ]] && { echo "Config not found: $CONFIG_PATH"; exit 1; }
 

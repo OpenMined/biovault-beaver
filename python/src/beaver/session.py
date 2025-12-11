@@ -439,7 +439,7 @@ class Session:
 
         # Also delete files in inbox (unencrypted peer folder) - incoming requests
         # The inbox is in unencrypted/<peer>/shared/biovault/sessions/<id>/
-        if self._context and hasattr(self._context, "_backend"):
+        if self._context and hasattr(self._context, "_backend") and self._context._backend:
             backend = self._context._backend
             inbox_path = (
                 backend.data_dir

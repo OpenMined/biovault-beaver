@@ -430,10 +430,13 @@ def _validate_artifact_path(path: str | Path, *, backend=None) -> Path:
     return resolved_candidate
 
 
-def _select_policy(policy=None) -> BeaverPolicy:
-    """Select effective policy considering env overrides."""
+def _select_policy(policy=None, *, trust_loader: bool = False) -> BeaverPolicy:
+    """Select effective policy considering env overrides and trust_loader flag."""
     if policy is not None:
         return policy
+    # trust_loader=True implies TRUSTED_POLICY (allows functions)
+    if trust_loader:
+        return TRUSTED_POLICY
     trusted_env = os.getenv("BEAVER_TRUSTED_POLICY", "").lower() in {"1", "true", "yes"} or (
         os.getenv("BEAVER_TRUSTED_LOADERS", "").lower() in {"1", "true", "yes"}
     )
@@ -905,7 +908,7 @@ def unpack(
         trust_loader: If True, run loader in trusted mode. If None, prompt on failure.
     """
     _install_builtin_aliases()
-    effective_policy: BeaverPolicy = _select_policy(policy)
+    effective_policy: BeaverPolicy = _select_policy(policy, trust_loader=bool(trust_loader))
     fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=effective_policy)
 
     # Register Twin type so it can be deserialized

@@ -1099,12 +1099,15 @@ class RemoteVarPointer:
                 missing.append(pkg)
         return missing
 
-    def _auto_load_twin(self, *, auto_accept: bool = False, policy=None):
+    def _auto_load_twin(
+        self, *, auto_accept: bool = False, policy=None, trust_loader: bool | None = None
+    ):
         """Auto-load Twin from published location if this is a Twin type.
 
         Args:
             auto_accept: If True, automatically accept trusted loaders without prompting
             policy: Deserialization policy to enforce (default: runtime default)
+            trust_loader: If True, run loader in trusted mode. If None, prompt on failure.
         """
         # Check if already loaded
         if self._loaded_twin is not None:
@@ -1227,7 +1230,11 @@ class RemoteVarPointer:
                     else:
                         env = read_envelope(data_path)
                     twin = env.load(
-                        inject=False, auto_accept=auto_accept, backend=backend, policy=policy
+                        inject=False,
+                        auto_accept=auto_accept,
+                        backend=backend,
+                        policy=policy,
+                        trust_loader=trust_loader,
                     )
                     if hasattr(twin, "public"):
                         twin.public = _ensure_sparse_shapes(twin.public)
@@ -1361,6 +1368,7 @@ class RemoteVarPointer:
         as_name: Optional[str] = None,
         auto_accept: bool = False,
         policy=None,
+        trust_loader: bool | None = None,
     ):
         """
         Load the remote variable data.
@@ -1372,6 +1380,9 @@ class RemoteVarPointer:
             inject: Whether to inject into globals
             as_name: Name to use in globals (defaults to remote var name)
             auto_accept: If True, automatically accept trusted loaders without prompting
+            trust_loader: If True, run loader in trusted mode (full builtins).
+                         If False, use RestrictedPython only (may fail).
+                         If None (default), try RestrictedPython first and prompt on failure.
 
         Returns:
             The loaded object (Twin, simple value, or pointer if not available)
@@ -1459,7 +1470,12 @@ class RemoteVarPointer:
                         else:
                             env = read_envelope(data_path)
 
-                        live_var = env.load(inject=False, auto_accept=auto_accept, backend=backend)
+                        live_var = env.load(
+                            inject=False,
+                            auto_accept=auto_accept,
+                            backend=backend,
+                            trust_loader=trust_loader,
+                        )
                         if isinstance(live_var, LiveVar):
                             if inject:
                                 import inspect
@@ -1484,7 +1500,9 @@ class RemoteVarPointer:
             # Try to load from published data location first
             from .twin import Twin
 
-            twin = self._auto_load_twin(auto_accept=auto_accept, policy=policy)
+            twin = self._auto_load_twin(
+                auto_accept=auto_accept, policy=policy, trust_loader=trust_loader
+            )
             if twin is not None:
                 if inject:
                     import inspect

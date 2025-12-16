@@ -641,16 +641,22 @@ class Twin(LiveMixin, RemoteData):
         first_line = src.strip().split("\n")[0]
         return any(f"def {name}(" in first_line for name in self._BUILTIN_DESERIALIZERS)
 
-    def _resolve_trusted_loader(self, loader_dict: dict, auto_accept: bool = False) -> Any:
+    def _resolve_trusted_loader(
+        self, loader_dict: dict, auto_accept: bool = False, trust_loader: bool | None = None
+    ) -> Any:
         """
         Resolve a TrustedLoader dict by delegating to runtime sandboxed resolver.
         """
         from .runtime import _resolve_trusted_loader
 
         backend = getattr(self, "_backend", None)
-        return _resolve_trusted_loader(loader_dict, auto_accept=auto_accept, backend=backend)
+        return _resolve_trusted_loader(
+            loader_dict, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+        )
 
-    def load(self, which: str = "auto", auto_accept: bool = False) -> Any:
+    def load(
+        self, which: str = "auto", auto_accept: bool = False, trust_loader: bool | None = None
+    ) -> Any:
         """
         Load data from TrustedLoader descriptors.
 
@@ -660,6 +666,9 @@ class Twin(LiveMixin, RemoteData):
         Args:
             which: "auto" (prefer private), "public", "private", or "both"
             auto_accept: If True, skip approval prompts
+            trust_loader: If True, run loader in trusted mode (full builtins).
+                         If False, use RestrictedPython only (may fail).
+                         If None (default), try RestrictedPython first and prompt on failure.
 
         Returns:
             The loaded value (prefers private if both loaded)
@@ -667,6 +676,8 @@ class Twin(LiveMixin, RemoteData):
         Example:
             >>> dataset = bv.datasets["owner"]["name"]
             >>> adata = dataset.sc_rnaseq.load()  # prompts, loads, returns AnnData
+            >>> # Or explicitly trust for automation:
+            >>> adata = dataset.sc_rnaseq.load(trust_loader=True)
         """
         loaded_private = False
         loaded_public = False
@@ -682,7 +693,9 @@ class Twin(LiveMixin, RemoteData):
         # If auto and private is a loader, load it
         if load_private:
             print(f"🔒 Loading PRIVATE data for Twin '{self.name or self.twin_id[:8]}'")
-            resolved = self._resolve_trusted_loader(raw_private, auto_accept=auto_accept)
+            resolved = self._resolve_trusted_loader(
+                raw_private, auto_accept=auto_accept, trust_loader=trust_loader
+            )
             if resolved is not None:
                 object.__setattr__(self, "private", resolved)
                 loaded_private = True
@@ -690,7 +703,9 @@ class Twin(LiveMixin, RemoteData):
         # If auto and public is a loader (and we didn't load private, or explicitly requested)
         if load_public and (not loaded_private or which in ("public", "both")):
             print(f"🌍 Loading PUBLIC data for Twin '{self.name or self.twin_id[:8]}'")
-            resolved = self._resolve_trusted_loader(raw_public, auto_accept=auto_accept)
+            resolved = self._resolve_trusted_loader(
+                raw_public, auto_accept=auto_accept, trust_loader=trust_loader
+            )
             if resolved is not None:
                 object.__setattr__(self, "public", resolved)
                 loaded_public = True

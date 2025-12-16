@@ -879,6 +879,7 @@ rules:
         poll_interval: float = 2.0,
         load: bool = True,
         auto_accept: bool = False,
+        trust_loader: bool | None = None,
     ):
         """
         Wait for a remote variable to be published by the peer.
@@ -889,6 +890,9 @@ rules:
             poll_interval: Seconds between checks (default 2)
             load: If True, load and return the value (default True)
             auto_accept: If True, automatically accept computation requests (default False)
+            trust_loader: If True, run loader in trusted mode (full builtins).
+                         If False, use RestrictedPython only (may fail).
+                         If None (default), try RestrictedPython first and prompt on failure.
 
         Returns:
             The loaded value if load=True, otherwise the RemoteVarEntry
@@ -914,7 +918,9 @@ rules:
                 if name in peer_vars:
                     print(f"📬 '{name}' is now available!")
                     if load:
-                        return peer_vars[name].load(auto_accept=auto_accept)
+                        return peer_vars[name].load(
+                            auto_accept=auto_accept, trust_loader=trust_loader
+                        )
                     return peer_vars[name]
             except Exception:
                 # Registry might not exist yet or be unreadable

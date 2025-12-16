@@ -892,6 +892,7 @@ def unpack(
     policy=None,
     auto_accept: bool = False,
     backend=None,
+    trust_loader: Optional[bool] = None,
 ) -> Any:
     """Deserialize the payload in a BeaverEnvelope.
 
@@ -901,6 +902,7 @@ def unpack(
         policy: Deserialization policy
         auto_accept: If True, automatically accept trusted loaders without prompting
         backend: Optional SyftBoxBackend for reading encrypted artifact files
+        trust_loader: If True, run loader in trusted mode. If None, prompt on failure.
     """
     _install_builtin_aliases()
     effective_policy: BeaverPolicy = _select_policy(policy)
@@ -924,11 +926,15 @@ def unpack(
         obj = fory.loads(envelope.payload)
     except Exception as e:
         raise SecurityError(f"Deserialization blocked by policy: {e}") from e
-    obj = _resolve_trusted_loader(obj, auto_accept=auto_accept, backend=backend)
+    obj = _resolve_trusted_loader(
+        obj, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+    )
     return obj
 
 
-def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None) -> Any:
+def _resolve_trusted_loader(
+    obj: Any, *, auto_accept: bool = False, backend=None, trust_loader: Optional[bool] = None
+) -> Any:
     """
     Resolve trusted-loader descriptors, prompting before execution.
 
@@ -938,6 +944,9 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         obj: The object to resolve
         auto_accept: If True, automatically accept trusted loaders without prompting
         backend: Optional SyftBoxBackend for reading encrypted artifact files
+        trust_loader: If True, run loader in trusted mode (full builtins).
+                     If False, use RestrictedPython.
+                     If None (default), try RestrictedPython first and prompt on failure.
     """
     try:
         from .twin import CapturedFigure, Twin  # local import to avoid cycles
@@ -949,16 +958,26 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         captured_figure_cls = None  # type: ignore
 
     if twin_cls is not None and isinstance(obj, twin_cls):
-        obj.public = _resolve_trusted_loader(obj.public, auto_accept=auto_accept, backend=backend)
-        obj.private = _resolve_trusted_loader(obj.private, auto_accept=auto_accept, backend=backend)
+        obj.public = _resolve_trusted_loader(
+            obj.public, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+        )
+        obj.private = _resolve_trusted_loader(
+            obj.private, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+        )
         # Also resolve captured figure lists (they contain _beaver_figure dicts)
         if hasattr(obj, "public_figures") and obj.public_figures:
             obj.public_figures = _resolve_trusted_loader(
-                obj.public_figures, auto_accept=auto_accept, backend=backend
+                obj.public_figures,
+                auto_accept=auto_accept,
+                backend=backend,
+                trust_loader=trust_loader,
             )
         if hasattr(obj, "private_figures") and obj.private_figures:
             obj.private_figures = _resolve_trusted_loader(
-                obj.private_figures, auto_accept=auto_accept, backend=backend
+                obj.private_figures,
+                auto_accept=auto_accept,
+                backend=backend,
+                trust_loader=trust_loader,
             )
         return obj
 
@@ -1084,8 +1103,10 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
             "yes",
         }
 
-        if trusted_loader_env:
-            # Trusted mode: execute with guarded import to only allow specific modules
+        def _run_trusted_loader():
+            """Execute loader in trusted mode with guarded imports."""
+            nonlocal scope
+
             def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
                 top = name.split(".")[0]
                 if top not in _ALLOWED_LOADER_MODULES:
@@ -1114,15 +1135,63 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
                 "locals": lambda: scope,
             }
             scope["__builtins__"] = safe_builtins
+            exec(src, scope, scope)
+
+        def _prompt_for_trust(error_msg: str) -> bool:
+            """Prompt user to approve trusted mode execution."""
+            import sys
+
+            # Check if we're in non-interactive mode
             try:
-                exec(src, scope, scope)
+                is_interactive = sys.stdin and sys.stdin.isatty() and "ipykernel" not in sys.modules
+            except Exception:
+                is_interactive = False
+
+            if not is_interactive:
+                return False
+
+            print(f"\n⚠️  Loader '{name}' failed in restricted mode: {error_msg}")
+            print(f"   Source preview:\n{preview}")
+            print(f"   Data path: {data_path}")
+            resp = input("   Allow trusted execution? [y/N]: ").strip().lower()
+            return resp in ("y", "yes")
+
+        # Determine execution mode
+        use_trusted = trust_loader is True or trusted_loader_env
+
+        if use_trusted:
+            # Trusted mode requested explicitly
+            try:
+                _run_trusted_loader()
             except Exception as e:
                 raise SecurityError(f"Trusted loader execution blocked: {e}") from e
         else:
+            # Try RestrictedPython first, prompt on failure if trust_loader is None
+            restricted_error = None
             try:
                 scope = _exec_restricted_loader(src, scope)
             except Exception as e:
-                raise SecurityError(f"Trusted loader execution blocked: {e}") from e
+                restricted_error = e
+
+            if restricted_error is not None:
+                # RestrictedPython failed - check if we should prompt or fail
+                if trust_loader is False:
+                    # Explicitly disabled trusted mode
+                    raise SecurityError(
+                        f"Loader execution failed in restricted mode: {restricted_error}"
+                    ) from restricted_error
+
+                # trust_loader is None - prompt user
+                if _prompt_for_trust(str(restricted_error)):
+                    try:
+                        _run_trusted_loader()
+                    except Exception as e:
+                        raise SecurityError(f"Trusted loader execution blocked: {e}") from e
+                else:
+                    raise SecurityError(
+                        f"Loader execution failed in restricted mode (trusted mode not approved): "
+                        f"{restricted_error}"
+                    ) from restricted_error
 
         # Merge back safe symbols from scope (exclude modules, frames, builtins, and private names)
         safe_symbols = {}
@@ -1253,14 +1322,24 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
                 temp_file.unlink()
 
     if isinstance(obj, list):
-        return [_resolve_trusted_loader(x, auto_accept=auto_accept, backend=backend) for x in obj]
+        return [
+            _resolve_trusted_loader(
+                x, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+            )
+            for x in obj
+        ]
     if isinstance(obj, tuple):
         return tuple(
-            _resolve_trusted_loader(x, auto_accept=auto_accept, backend=backend) for x in obj
+            _resolve_trusted_loader(
+                x, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+            )
+            for x in obj
         )
     if isinstance(obj, dict):
         return {
-            k: _resolve_trusted_loader(v, auto_accept=auto_accept, backend=backend)
+            k: _resolve_trusted_loader(
+                v, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+            )
             for k, v in obj.items()
         }
     return obj

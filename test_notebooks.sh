@@ -34,17 +34,15 @@ if [[ -n "$CONFIG_PATH" && "$CONFIG_PATH" == *"00-malicious"* ]]; then
 fi
 
 # Set environment based on mode
+# BEAVER_TRUSTED_LOADERS removed - notebooks should explicitly use trust_loader=True kwarg
 if [[ "$SECURITY_TEST" == "1" ]]; then
-    # Security test mode: still need trusted loaders for DO to load data,
-    # but the security comes from human review (not approving malicious results)
+    # Security test mode: auto-accept prompts, but loaders require explicit trust_loader=True
     export BEAVER_AUTO_ACCEPT="${BEAVER_AUTO_ACCEPT:-1}"
-    export BEAVER_TRUSTED_LOADERS="${BEAVER_TRUSTED_LOADERS:-1}"
     export BEAVER_TRUSTED_POLICY="${BEAVER_TRUSTED_POLICY:-1}"
     echo "Security test mode: Testing human-review security model"
 else
-    # Normal mode: trusted environment for CI
+    # Normal mode: auto-accept prompts, loaders require explicit trust_loader=True
     export BEAVER_AUTO_ACCEPT="${BEAVER_AUTO_ACCEPT:-1}"
-    export BEAVER_TRUSTED_LOADERS="${BEAVER_TRUSTED_LOADERS:-1}"
     export BEAVER_TRUSTED_POLICY="${BEAVER_TRUSTED_POLICY:-1}"
 fi
 

@@ -51,6 +51,7 @@ class BeaverEnvelope:
         context=None,
         auto_accept: bool = False,
         backend=None,
+        trust_loader: bool | None = None,
     ) -> Any:
         """
         Load the envelope payload and inject into caller's globals.
@@ -65,6 +66,7 @@ class BeaverEnvelope:
             context: BeaverContext for live subscription (auto-detected if None)
             auto_accept: If True, automatically accept trusted loaders without prompting
             backend: Optional SyftBoxBackend for reading encrypted artifact files
+            trust_loader: If True, run loader in trusted mode. If None, prompt on failure.
         """
         import inspect
 
@@ -83,7 +85,14 @@ class BeaverEnvelope:
         ):
             backend = context._backend
 
-        obj = unpack(self, strict=strict, policy=policy, auto_accept=auto_accept, backend=backend)
+        obj = unpack(
+            self,
+            strict=strict,
+            policy=policy,
+            auto_accept=auto_accept,
+            backend=backend,
+            trust_loader=trust_loader,
+        )
 
         # Attach session reference if envelope was loaded from a session context
         if hasattr(self, "_session") and self._session is not None:

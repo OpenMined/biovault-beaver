@@ -181,7 +181,7 @@ def _run_deserializer_in_subprocess(
         "        pass",
         "",
         # Inject metadata if provided (mirrors runtime injection)
-        f"scope['_beaver_meta'] = {json.dumps(meta) if meta is not None else 'None'}",
+        f"scope['beaver_meta'] = {json.dumps(meta) if meta is not None else 'None'}",
         "",
         SUMMARY_SOURCE,
         f"exec({src!r}, scope, scope)",

@@ -3350,12 +3350,13 @@ class BeaverContext:
 
         # First, check for existing matching requests (return immediately if found)
         # Try fast match first, then deep match for backwards compatibility
+        # Use TRUSTED_POLICY since ComputationRequest contains functions (for review, not execution)
         for inbox_path in candidate_inboxes:
             for env in list_inbox(inbox_path, backend=self._backend):
                 if _matches_target_fast(env):
                     print(f"📬 Found existing request: {env.name}")
                     print(f"   From: {env.sender}")
-                    obj = unpack(env, strict=self.strict, policy=self.policy)
+                    obj = unpack(env, strict=self.strict, policy=TRUSTED_POLICY)
                     _mark_processed(env)
                     return obj
 
@@ -3364,7 +3365,7 @@ class BeaverContext:
             for inbox_path in candidate_inboxes:
                 for env in list_inbox(inbox_path, backend=self._backend):
                     if env.name and env.name.startswith("request_") and not _is_processed(env):
-                        obj = unpack(env, strict=self.strict, policy=self.policy)
+                        obj = unpack(env, strict=self.strict, policy=TRUSTED_POLICY)
                         if _matches_target_deep(obj, env):
                             print(f"📬 Found existing request: {env.name}")
                             print(f"   From: {env.sender}")
@@ -3396,7 +3397,7 @@ class BeaverContext:
                     if _matches_target_fast(env):
                         print(f"📬 Request received: {env.name}")
                         print(f"   From: {env.sender}")
-                        obj = unpack(env, strict=self.strict, policy=self.policy)
+                        obj = unpack(env, strict=self.strict, policy=TRUSTED_POLICY)
                         _mark_processed(env)
                         return obj
 
@@ -3407,7 +3408,7 @@ class BeaverContext:
                         and env.name.startswith("request_")
                         and not _is_processed(env)
                     ):
-                        obj = unpack(env, strict=self.strict, policy=self.policy)
+                        obj = unpack(env, strict=self.strict, policy=TRUSTED_POLICY)
                         if _matches_target_deep(obj, env):
                             print(f"📬 Request received: {env.name}")
                             print(f"   From: {env.sender}")

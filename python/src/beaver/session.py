@@ -911,17 +911,36 @@ rules:
 
         print(f"⏳ Waiting for '{name}' from {self.peer}...")
 
+        announced = False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
                 peer_vars = self.peer_remote_vars
                 if name in peer_vars:
-                    print(f"📬 '{name}' is now available!")
-                    if load:
-                        return peer_vars[name].load(
-                            auto_accept=auto_accept, trust_loader=trust_loader
+                    if not announced:
+                        print(f"📬 '{name}' is now available!")
+                        announced = True
+
+                    entry = peer_vars[name]
+                    if not load:
+                        return entry
+
+                    # Avoid injecting into beaver.session module globals; return the value to caller.
+                    value = entry.load(
+                        inject=False,
+                        auto_accept=auto_accept,
+                        trust_loader=trust_loader,
+                    )
+                    if value is entry and getattr(entry, "_last_error", None) is not None:
+                        # Make permanent deserialization failures obvious (otherwise we just time out).
+                        raise RuntimeError(
+                            f"Remote var '{name}' exists but could not be loaded: {entry._last_error}"
                         )
-                    return peer_vars[name]
+                    if value is not None:
+                        return value
+            except RuntimeError:
+                # Surface permanent load errors (deserialization policy, schema mismatch, etc.)
+                raise
             except Exception:
                 # Registry might not exist yet or be unreadable
                 pass

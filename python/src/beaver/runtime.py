@@ -33,6 +33,38 @@ class SecurityError(Exception):
     """Raised when a security policy violation is detected."""
 
 
+try:  # pragma: no cover
+    from pyfory.error import TypeNotCompatibleError
+    from pyfory.serializer import DataClassSerializer
+except Exception:  # pragma: no cover
+    TypeNotCompatibleError = None  # type: ignore[assignment]
+    DataClassSerializer = None  # type: ignore[assignment]
+
+
+if DataClassSerializer is not None:
+
+    class _LenientDataClassSerializer(DataClassSerializer):
+        """Dataclass serializer that ignores schema-hash mismatches in non-compatible mode.
+
+        This is only used as a targeted fallback for legacy Beaver internal types (Twin/LiveVar)
+        when payloads were produced by older runtimes whose pyfory schema hash differs.
+        """
+
+        def _read_header(self, buffer):
+            if not self.fory.compatible:
+                # Legacy/non-compatible payloads write an int32 schema hash first.
+                # We intentionally ignore it and continue reading fields in the current schema order.
+                buffer.read_int32()
+                return len(self._field_names)
+            return super()._read_header(buffer)
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            # Force using the Python implementation (not the JIT-generated read method),
+            # so our overridden _read_header takes effect.
+            self.read = lambda buffer: DataClassSerializer.read(self, buffer)  # type: ignore[method-assign]
+
+
 if TYPE_CHECKING:
     from .session import Session
 
@@ -300,28 +332,30 @@ def _sanitize_for_serialization(obj: Any) -> Any:
         return obj
 
     # Handle matplotlib Figure/Axes
-    try:
-        import matplotlib.figure
-        from matplotlib.axes import Axes
+    type_module = getattr(obj.__class__, "__module__", "") or ""
+    if type_module.startswith("matplotlib."):
+        try:
+            import matplotlib.figure
+            from matplotlib.axes import Axes
 
-        if isinstance(obj, matplotlib.figure.Figure):
-            import io
-
-            buf = io.BytesIO()
-            obj.savefig(buf, format="png", bbox_inches="tight", dpi=100)
-            buf.seek(0)
-            return {"_beaver_figure": True, "png_bytes": buf.getvalue()}
-        if isinstance(obj, Axes):
-            if obj.figure:
+            if isinstance(obj, matplotlib.figure.Figure):
                 import io
 
                 buf = io.BytesIO()
-                obj.figure.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+                obj.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                 buf.seek(0)
                 return {"_beaver_figure": True, "png_bytes": buf.getvalue()}
-            return {"_beaver_axes": True, "title": str(obj.get_title())}
-    except ImportError:
-        pass
+            if isinstance(obj, Axes):
+                if obj.figure:
+                    import io
+
+                    buf = io.BytesIO()
+                    obj.figure.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+                    buf.seek(0)
+                    return {"_beaver_figure": True, "png_bytes": buf.getvalue()}
+                return {"_beaver_axes": True, "title": str(obj.get_title())}
+        except ImportError:
+            pass
 
     # Handle numpy types
     try:
@@ -800,8 +834,29 @@ def pack(
         recipients=recipients,
     )
 
+    compatible_env = os.getenv("BEAVER_FORY_COMPATIBLE")
+    if compatible_env is None:
+        # Default to compatible mode for cross-machine (SyftBox) sharing.
+        fory_compatible = backend is not None
+    else:
+        fory_compatible = compatible_env.lower() in {"1", "true", "yes", "on"}
+
+    field_nullable_env = os.getenv("BEAVER_FORY_FIELD_NULLABLE")
+    if field_nullable_env is None:
+        # Nullable-by-default is more tolerant to Optional/type-hint inference differences.
+        fory_field_nullable = fory_compatible
+    else:
+        fory_field_nullable = field_nullable_env.lower() in {"1", "true", "yes", "on"}
+
     effective_policy = _select_policy(policy)
-    fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=effective_policy)
+    fory = pyfory.Fory(
+        xlang=False,
+        ref=True,
+        strict=strict,
+        policy=effective_policy,
+        compatible=fory_compatible,
+        field_nullable=fory_field_nullable,
+    )
 
     # Register Twin type so it can be deserialized
     from .twin import Twin
@@ -817,6 +872,16 @@ def pack(
     manifest = _summarize(obj)
     manifest["size_bytes"] = len(payload)
     manifest["language"] = "python"
+    manifest["fory_compatible"] = fory_compatible
+    manifest["fory_field_nullable"] = fory_field_nullable
+    # Help debug cross-machine deserialization mismatches (pyfory schema hashes depend on runtime).
+    try:  # pragma: no cover
+        import platform
+
+        manifest["pyfory_version"] = getattr(pyfory, "__version__", "unknown")
+        manifest["python_version"] = platform.python_version()
+    except Exception:  # pragma: no cover
+        pass
 
     # If packing a ComputationRequest, add required_versions to manifest
     from .computation import ComputationRequest, _detect_function_imports_with_versions
@@ -909,26 +974,137 @@ def unpack(
     """
     _install_builtin_aliases()
     effective_policy: BeaverPolicy = _select_policy(policy, trust_loader=bool(trust_loader))
-    fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=effective_policy)
 
-    # Register Twin type so it can be deserialized
-    from .twin import Twin
+    # Prefer sender settings when available (supports cross-OS / cross-Python patch sharing).
+    sender_manifest = envelope.manifest or {}
+    sender_compatible = sender_manifest.get("fory_compatible")
+    sender_field_nullable = sender_manifest.get("fory_field_nullable")
 
-    fory.register_type(Twin)
+    compatible_env = os.getenv("BEAVER_FORY_COMPATIBLE")
+    if compatible_env is None:
+        # Default to sender preference; if missing, enable for SyftBox/cross-machine mode.
+        fory_compatible = (
+            bool(sender_compatible) if sender_compatible is not None else backend is not None
+        )
+    else:
+        fory_compatible = compatible_env.lower() in {"1", "true", "yes", "on"}
 
-    # Register LiveVar type
-    from .live_var import LiveVar
+    field_nullable_env = os.getenv("BEAVER_FORY_FIELD_NULLABLE")
+    if field_nullable_env is None:
+        fory_field_nullable = (
+            bool(sender_field_nullable) if sender_field_nullable is not None else fory_compatible
+        )
+    else:
+        fory_field_nullable = field_nullable_env.lower() in {"1", "true", "yes", "on"}
 
-    fory.register_type(LiveVar)
+    def _loads_with(
+        *, compatible: bool, field_nullable: bool, lenient_internal_hash: bool = False
+    ) -> Any:
+        f = pyfory.Fory(
+            xlang=False,
+            ref=True,
+            strict=strict,
+            policy=effective_policy,
+            compatible=compatible,
+            field_nullable=field_nullable,
+        )
+
+        # Register Beaver internal types.
+        from .live_var import LiveVar
+        from .twin import Twin
+
+        if lenient_internal_hash and _LenientDataClassSerializer is not None:
+            f.register_type(Twin, serializer=_LenientDataClassSerializer(f, Twin))
+            f.register_type(LiveVar, serializer=_LenientDataClassSerializer(f, LiveVar))
+        else:
+            f.register_type(Twin)
+            f.register_type(LiveVar)
+
+        return f.loads(envelope.payload)
 
     # Block pickle payloads outright (magic 0x80 precedes pickle protocol)
     if envelope.payload.startswith(b"\x80"):
         raise SecurityError("Pickle payloads are blocked.")
 
     try:
-        obj = fory.loads(envelope.payload)
+        obj = _loads_with(compatible=fory_compatible, field_nullable=fory_field_nullable)
     except Exception as e:
-        raise SecurityError(f"Deserialization blocked by policy: {e}") from e
+        original_exc = e
+        original_msg = str(e)
+
+        def _looks_like_out_of_bound(msg: str) -> bool:
+            return "out of bound" in msg or "read_varuint32" in msg
+
+        def _looks_like_hash_mismatch(msg: str) -> bool:
+            return "Hash " in msg and "not consistent with" in msg and "beaver." in msg
+
+        attempts: list[str] = [
+            f"compatible={fory_compatible} field_nullable={fory_field_nullable} (primary)"
+        ]
+
+        # If we don't know what mode the sender used (no manifest flags) and we're in compatible
+        # mode (common in SyftBox contexts), legacy non-compatible payloads can fail with
+        # buffer out-of-bound errors. Retry in non-compatible mode.
+        if (
+            fory_compatible
+            and compatible_env is None
+            and sender_compatible is None
+            and _looks_like_out_of_bound(original_msg)
+        ):
+            try:
+                attempts.append("compatible=False field_nullable=False (fallback legacy)")
+                obj = _loads_with(compatible=False, field_nullable=False)
+            except Exception as retry_exc:
+                original_exc = retry_exc
+                original_msg = str(retry_exc)
+
+        # Legacy non-compatible payloads can fail on internal-type schema hash mismatches.
+        attempted_legacy_fallback = any("fallback legacy" in a for a in attempts)
+        if (not fory_compatible or attempted_legacy_fallback) and _looks_like_hash_mismatch(
+            original_msg
+        ):
+            try:
+                attempts.append(
+                    "compatible=False field_nullable=<same> lenient_internal_hash=True (fallback)"
+                )
+                obj = _loads_with(
+                    compatible=False,
+                    field_nullable=fory_field_nullable,
+                    lenient_internal_hash=True,
+                )
+            except Exception as retry_exc:
+                original_exc = retry_exc
+                original_msg = str(retry_exc)
+
+        if "obj" not in locals():
+            msg = original_msg
+            if _looks_like_hash_mismatch(msg):
+                sender_py = (envelope.manifest or {}).get("python_version")
+                sender_pf = (envelope.manifest or {}).get("pyfory_version")
+                receiver_py = None
+                receiver_pf = getattr(pyfory, "__version__", None)
+                try:  # pragma: no cover
+                    import platform
+
+                    receiver_py = platform.python_version()
+                except Exception:  # pragma: no cover
+                    receiver_py = None
+                msg += (
+                    " (Likely sender/receiver runtime mismatch; ensure both sides run the same Beaver code + pyfory version"
+                    + (
+                        f"; sender python={sender_py} pyfory={sender_pf}, receiver python={receiver_py} pyfory={receiver_pf}"
+                        if (sender_py or sender_pf or receiver_py or receiver_pf)
+                        else ""
+                    )
+                    + (
+                        "; if you're sharing across OS/Python patch versions, enable compatible mode with `BEAVER_FORY_COMPATIBLE=1` and republish"
+                        if not fory_compatible
+                        else ""
+                    )
+                    + ".)"
+                )
+            msg += f" (attempts: {', '.join(attempts)})"
+            raise SecurityError(f"Deserialization blocked by policy: {msg}") from original_exc
     obj = _resolve_trusted_loader(
         obj, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
     )

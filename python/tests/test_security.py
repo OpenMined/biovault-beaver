@@ -367,6 +367,10 @@ def test_data_location_path_traversal_attack_blocked():
     with pytest.raises(DataLocationSecurityError):
         _sanitize_data_location("data/safe.beaver\x00/etc/passwd", base_dir=Path("/some/session"))
 
+    # Attack 7: Encoded null byte injection
+    with pytest.raises(DataLocationSecurityError):
+        _sanitize_data_location("data/safe.beaver%00/etc/passwd", base_dir=Path("/some/session"))
+
 
 def test_data_location_valid_relative_paths():
     """Valid relative paths should be accepted and normalized to Unix-style."""
@@ -387,13 +391,12 @@ def test_data_location_valid_relative_paths():
     assert result == "data/subdir/file.beaver"
 
 
-def test_data_location_resolves_correctly_on_read():
+def test_data_location_resolves_correctly_on_read(tmp_path):
     """When reading, relative data_location should resolve against session dir."""
     from beaver.remote_vars import _resolve_data_location
 
-    # Unix system
-    session_dir = Path(
-        "/Users/madhavajay/Desktop/BioVault/datasites/me@madhavajay.com/shared/biovault/sessions/abc123"
+    session_dir = (
+        tmp_path / "datasites" / "me@example.com" / "shared" / "biovault" / "sessions" / "abc123"
     )
     relative = "data/4c1b51ae.beaver"
 

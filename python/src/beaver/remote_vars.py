@@ -56,8 +56,12 @@ def _sanitize_data_location(path_str: str, *, base_dir: Path) -> str:
             f"data_location contains null byte (possible injection attack): {path_str!r}"
         )
 
-    # Decode any URL-encoded characters to catch encoded traversal
+    # Decode any URL-encoded characters to catch encoded traversal and encoded null bytes.
     decoded = urllib.parse.unquote(path_str)
+    if "\x00" in decoded:
+        raise DataLocationSecurityError(
+            f"data_location contains encoded null byte (possible injection attack): {path_str!r}"
+        )
 
     # Normalize separators to forward slashes for consistent checking
     normalized = decoded.replace("\\", "/")
@@ -1395,7 +1399,7 @@ class RemoteVarPointer:
                 if is_relative and session_dir:
                     # New format: relative path - validate and resolve
                     try:
-                        _sanitize_data_location(data_location, base_dir=session_dir)
+                        data_location = _sanitize_data_location(data_location, base_dir=session_dir)
                         data_path = _resolve_data_location(data_location, session_dir=session_dir)
                     except DataLocationSecurityError as e:
                         self._last_error = e

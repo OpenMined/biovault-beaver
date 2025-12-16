@@ -518,6 +518,61 @@ def _analyze_loader_source(src: str, allowed_imports: Optional[set[str]] = None)
                     raise SecurityError(f"Blocked dynamic import: {modname}")
 
 
+def _loader_defined_functions(src: str) -> list[str]:
+    """Return top-level function names defined by loader source."""
+    import ast
+
+    try:
+        tree = ast.parse(src)
+    except Exception:
+        return []
+    return [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
+
+
+def _posixify_path(p: str | Path) -> str:
+    return str(p).replace("\\", "/")
+
+
+def _cross_platform_filename(path_str: str) -> str:
+    """Extract filename from a path that may be Windows or Unix format.
+
+    On POSIX systems, Path("C:\\Users\\...\\file.txt").name returns the entire
+    string because backslashes aren't path separators. This function handles
+    both Windows and Unix paths correctly on any platform.
+    """
+    if not path_str:
+        return path_str
+    normalized = path_str.replace("\\", "/")
+    return normalized.rsplit("/", 1)[-1]
+
+
+def _relative_posix_path(path: Path, base_dir: Optional[Path]) -> Optional[str]:
+    if base_dir is None:
+        return None
+    try:
+        rel = path.resolve().relative_to(base_dir.resolve())
+    except Exception:
+        return None
+    return _posixify_path(rel)
+
+
+def _trusted_loader_base_dir(artifact_dir: Optional[Path], backend) -> Optional[Path]:
+    """Choose a base dir for TrustedLoader relative paths.
+
+    We prefer storing paths relative to the *session* directory (not the session/data dir),
+    so loaders can only reference artifacts within the session tree (e.g. `data/foo.bin`).
+    """
+    if artifact_dir is not None:
+        resolved = Path(artifact_dir).resolve()
+        if resolved.name == "data":
+            return resolved.parent
+        return resolved
+    if backend is not None and getattr(backend, "data_dir", None) is not None:
+        # Allow relative-to-datasites-root paths like `<email>/shared/...`.
+        return (Path(backend.data_dir).resolve() / "datasites").resolve()
+    return None
+
+
 def _exec_restricted_loader(src: str, scope: dict) -> dict:
     """Execute loader code in a RestrictedPython sandbox."""
     try:
@@ -618,10 +673,13 @@ def _prepare_for_sending(
             )
         )
         src_clean = textwrap.dedent(src_clean)
+        base_dir = _trusted_loader_base_dir(artifact_dir, backend)
+        # Prefer relative unix-style paths; avoid embedding OS absolute paths in payloads.
+        path_for_loader = _relative_posix_path(path, base_dir) or path.name
         result = {
             "_trusted_loader": True,
             "name": tl["name"],
-            "path": str(path),
+            "path": path_for_loader,
             "deserializer_src": src_clean,
         }
         if meta:
@@ -664,10 +722,12 @@ def _prepare_for_sending(
                 )
             )
             src_clean = textwrap.dedent(src_clean)
+            base_dir = _trusted_loader_base_dir(artifact_dir, backend)
+            path_for_loader = _relative_posix_path(path, base_dir) or path.name
             public_obj = {
                 "_trusted_loader": True,
                 "name": tl_pub["name"],
-                "path": str(path),
+                "path": path_for_loader,
                 "deserializer_src": src_clean,
             }
             if meta:
@@ -696,10 +756,12 @@ def _prepare_for_sending(
                     )
                 )
                 src_clean = textwrap.dedent(src_clean)
+                base_dir = _trusted_loader_base_dir(artifact_dir, backend)
+                path_for_loader = _relative_posix_path(path, base_dir) or path.name
                 private_obj = {
                     "_trusted_loader": True,
                     "name": tl_priv["name"],
-                    "path": str(path),
+                    "path": path_for_loader,
                     "deserializer_src": src_clean,
                 }
                 if meta:
@@ -934,9 +996,10 @@ def write_envelope(envelope: BeaverEnvelope, out_dir: Path | str = ".") -> Path:
 
 def read_envelope(path: Path | str) -> BeaverEnvelope:
     """Load a BeaverEnvelope from disk."""
-    record = json.loads(Path(path).read_text())
+    path_obj = Path(path)
+    record = json.loads(path_obj.read_text())
     payload = base64.b64decode(record["payload_b64"])
-    return BeaverEnvelope(
+    env = BeaverEnvelope(
         version=record.get("version", 1),
         envelope_id=record.get("envelope_id"),
         sender=record.get("sender", "unknown"),
@@ -949,6 +1012,9 @@ def read_envelope(path: Path | str) -> BeaverEnvelope:
         reply_to=record.get("reply_to"),
         payload=payload,
     )
+    # Non-serialized hint used to resolve TrustedLoader relative artifact paths.
+    env._path = str(path_obj)  # type: ignore[attr-defined]
+    return env
 
 
 def unpack(
@@ -1111,13 +1177,22 @@ def unpack(
             msg += f" (attempts: {', '.join(attempts)})"
             raise SecurityError(f"Deserialization blocked by policy: {msg}") from last_exc
     obj = _resolve_trusted_loader(
-        obj, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+        obj,
+        auto_accept=auto_accept,
+        backend=backend,
+        trust_loader=trust_loader,
+        envelope_path=getattr(envelope, "_path", None),
     )
     return obj
 
 
 def _resolve_trusted_loader(
-    obj: Any, *, auto_accept: bool = False, backend=None, trust_loader: Optional[bool] = None
+    obj: Any,
+    *,
+    auto_accept: bool = False,
+    backend=None,
+    trust_loader: Optional[bool] = None,
+    envelope_path: str | Path | None = None,
 ) -> Any:
     """
     Resolve trusted-loader descriptors, prompting before execution.
@@ -1143,10 +1218,18 @@ def _resolve_trusted_loader(
 
     if twin_cls is not None and isinstance(obj, twin_cls):
         obj.public = _resolve_trusted_loader(
-            obj.public, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+            obj.public,
+            auto_accept=auto_accept,
+            backend=backend,
+            trust_loader=trust_loader,
+            envelope_path=envelope_path,
         )
         obj.private = _resolve_trusted_loader(
-            obj.private, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+            obj.private,
+            auto_accept=auto_accept,
+            backend=backend,
+            trust_loader=trust_loader,
+            envelope_path=envelope_path,
         )
         # Also resolve captured figure lists (they contain _beaver_figure dicts)
         if hasattr(obj, "public_figures") and obj.public_figures:
@@ -1155,6 +1238,7 @@ def _resolve_trusted_loader(
                 auto_accept=auto_accept,
                 backend=backend,
                 trust_loader=trust_loader,
+                envelope_path=envelope_path,
             )
         if hasattr(obj, "private_figures") and obj.private_figures:
             obj.private_figures = _resolve_trusted_loader(
@@ -1162,6 +1246,7 @@ def _resolve_trusted_loader(
                 auto_accept=auto_accept,
                 backend=backend,
                 trust_loader=trust_loader,
+                envelope_path=envelope_path,
             )
         return obj
 
@@ -1202,28 +1287,77 @@ def _resolve_trusted_loader(
         src = obj.get("deserializer_src", "")
         meta = obj.get("meta")  # Embedded metadata (e.g., pandas kind/name)
 
+        backend_data_dir = None
+        if backend is not None and getattr(backend, "data_dir", None) is not None:
+            backend_data_dir = Path(backend.data_dir).resolve()
+
         # Translate path from sender's perspective to local view
         # If path contains /datasites/<identity>/, map to our local view
         # ALWAYS translate when backend is available - file is synced to our local view
-        if data_path and backend:
+        if data_path and backend and backend_data_dir is not None:
+            stored = str(data_path)
+            normalized = stored.replace("\\", "/")
+            lower = normalized.lower()
+            marker = "/datasites/"
+            idx = lower.find(marker)
+            if idx >= 0:
+                relative = normalized[idx + len(marker) :].lstrip("/")
+                parts = [p for p in relative.split("/") if p]
+                if len(parts) >= 2 and parts[1] in {"shared", "app_data", "public"}:
+                    data_path = str(Path(backend_data_dir) / "datasites" / relative)
+            elif normalized.startswith("datasites/"):
+                data_path = str(Path(backend_data_dir) / normalized)
+            else:
+                # Newer on-wire form may already be relative to datasites root:
+                #   <email>/shared/... or <email>/app_data/... or <email>/public/...
+                parts = [p for p in normalized.split("/") if p]
+                if len(parts) >= 2 and parts[1] in {"shared", "app_data", "public"}:
+                    data_path = str(Path(backend_data_dir) / "datasites" / normalized)
+
+        # Resolve relative unix-style paths against the envelope's directory when available.
+        if data_path and envelope_path is not None:
             import re
 
-            # Match paths like .../datasites/<email>/shared/...
-            match = re.search(r"/datasites/([^/]+)/(shared|app_data|public)/", data_path)
-            if match:
-                datasite_identity = match.group(1)
-                # Get path after the datasite identity
-                idx = data_path.find(f"/datasites/{datasite_identity}/")
-                if idx >= 0:
-                    relative_path = data_path[idx + len("/datasites/") :]
-                    # Translate to our local datasites folder
-                    translated = str(backend.data_dir / "datasites" / relative_path)
-                    # Always use translated path - file should be synced to our local view
-                    data_path = translated
+            stored = str(data_path)
+            normalized = stored.replace("\\", "/")
+            is_absolute = bool(
+                normalized.startswith("/")
+                or normalized.startswith("\\\\")
+                or re.match(r"^[A-Za-z]:", normalized)
+            )
+            if not is_absolute:
+                parts = [p for p in normalized.split("/") if p]
+                if ".." in parts:
+                    raise SecurityError(f"Path traversal detected for artifact: {data_path}")
+                # If the envelope lives in a session `data/` folder, treat paths as relative
+                # to the session directory (so artifacts use `data/<name>.bin`).
+                envelope_dir = Path(envelope_path).resolve().parent
+                session_base = envelope_dir.parent if envelope_dir.name == "data" else envelope_dir
+                candidate = session_base.joinpath(*parts)
+                # Back-compat: if older payloads stored filenames relative to `data/`, accept them.
+                if not candidate.exists():
+                    candidate_in_data = (session_base / "data").joinpath(*parts)
+                    if candidate_in_data.exists():
+                        candidate = candidate_in_data
+
+                # If the envelope was read from the unencrypted shadow cache, prefer the
+                # encrypted datasites path (read_with_shadow decrypts from encrypted path).
+                if backend_data_dir is not None:
+                    shadow_root = (backend_data_dir / "unencrypted").resolve()
+                    datasites_root = (backend_data_dir / "datasites").resolve()
+                    with contextlib.suppress(Exception):
+                        rel_from_shadow = candidate.resolve().relative_to(shadow_root)
+                        candidate2 = (datasites_root / rel_from_shadow).resolve()
+                        if candidate2.exists():
+                            candidate = candidate2
+
+                data_path = str(candidate)
 
         # Validate artifact path to prevent traversal/symlink escapes
         if data_path:
             _validate_artifact_path(data_path, backend=backend)
+
+        defined_functions = _loader_defined_functions(src)
 
         preview = "\n".join(src.strip().splitlines()[:5])
         auto_accept_env = os.getenv("BEAVER_AUTO_ACCEPT", "").lower() in {"1", "true", "yes"}
@@ -1401,7 +1535,14 @@ def _resolve_trusted_loader(
             scope.get("pandas"),
             scope.get("numpy"),
         }
-        deser_fn = next((v for v in scope.values() if callable(v) and v not in excluded), None)
+        deser_fn = None
+        for fn_name in defined_functions:
+            candidate = scope.get(fn_name)
+            if callable(candidate) and candidate not in excluded:
+                deser_fn = candidate
+                break
+        if deser_fn is None:
+            deser_fn = next((v for v in scope.values() if callable(v) and v not in excluded), None)
         if deser_fn is None:
             raise RuntimeError("No deserializer found in loader source")
 
@@ -1434,13 +1575,15 @@ def _resolve_trusted_loader(
                     )
 
                 file_path = Path(data_path)
+                # Use cross-platform filename extraction for display (handles Windows paths on POSIX)
+                display_filename = _cross_platform_filename(data_path)
                 if not file_path.exists():
                     if not waited:
-                        print(f"⏳ Waiting for artifact file to sync: {file_path.name}")
+                        print(f"⏳ Waiting for artifact file to sync: {display_filename}")
                         waited = True
                     if now - last_print >= spinner_interval:
                         spin_idx = (spin_idx + 1) % len(spinner_chars)
-                        print(f"{spinner_chars[spin_idx]} waiting for {file_path.name}", end="\r")
+                        print(f"{spinner_chars[spin_idx]} waiting for {display_filename}", end="\r")
                         last_print = now
                     _time.sleep(sync_poll)
                     continue
@@ -1452,13 +1595,13 @@ def _resolve_trusted_loader(
                     stable_since = now
                     if not waited:
                         print(
-                            f"⏳ Waiting for artifact file to sync: {file_path.name} ({current_size:,} bytes)"
+                            f"⏳ Waiting for artifact file to sync: {display_filename} ({current_size:,} bytes)"
                         )
                         waited = True
                     if now - last_print >= spinner_interval:
                         spin_idx = (spin_idx + 1) % len(spinner_chars)
                         print(
-                            f"{spinner_chars[spin_idx]} syncing {file_path.name} ({current_size:,} bytes)",
+                            f"{spinner_chars[spin_idx]} syncing {display_filename} ({current_size:,} bytes)",
                             end="\r",
                         )
                         last_print = now
@@ -1472,14 +1615,16 @@ def _resolve_trusted_loader(
                 if now - last_print >= spinner_interval:
                     spin_idx = (spin_idx + 1) % len(spinner_chars)
                     print(
-                        f"{spinner_chars[spin_idx]} syncing {file_path.name} ({current_size:,} bytes)",
+                        f"{spinner_chars[spin_idx]} syncing {display_filename} ({current_size:,} bytes)",
                         end="\r",
                     )
                     last_print = now
                 _time.sleep(sync_poll)
 
             if waited:
-                print(f"\n✓ Artifact file synced: {Path(data_path).name} ({last_size:,} bytes)")
+                print(
+                    f"\n✓ Artifact file synced: {_cross_platform_filename(data_path)} ({last_size:,} bytes)"
+                )
             else:
                 print()
 
@@ -1508,21 +1653,33 @@ def _resolve_trusted_loader(
     if isinstance(obj, list):
         return [
             _resolve_trusted_loader(
-                x, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+                x,
+                auto_accept=auto_accept,
+                backend=backend,
+                trust_loader=trust_loader,
+                envelope_path=envelope_path,
             )
             for x in obj
         ]
     if isinstance(obj, tuple):
         return tuple(
             _resolve_trusted_loader(
-                x, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+                x,
+                auto_accept=auto_accept,
+                backend=backend,
+                trust_loader=trust_loader,
+                envelope_path=envelope_path,
             )
             for x in obj
         )
     if isinstance(obj, dict):
         return {
             k: _resolve_trusted_loader(
-                v, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+                v,
+                auto_accept=auto_accept,
+                backend=backend,
+                trust_loader=trust_loader,
+                envelope_path=envelope_path,
             )
             for k, v in obj.items()
         }

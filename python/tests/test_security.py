@@ -260,6 +260,78 @@ def test_twin_private_attribute_access_does_not_auto_execute_loader(tmp_path):
     assert not marker.exists(), "Loader was auto-executed just by accessing .private!"
 
 
+def test_restricted_loader_blocks_underscore_prefixed_variables(tmp_path):
+    """RestrictedPython blocks variable names starting with underscore.
+
+    This is a security feature that prevents access to Python internals like
+    __class__, __dict__, etc. The deserializer code in lib_support.py must
+    avoid using underscore-prefixed variable names or RestrictedPython will
+    reject the code entirely.
+    """
+    loader = {
+        "_trusted_loader": True,
+        "path": str(tmp_path / "data.bin"),
+        "deserializer_src": (
+            "from pathlib import Path as _Path\n"
+            "_my_var = 'test'\n"
+            "def load(p):\n"
+            "    return _my_var\n"
+        ),
+    }
+
+    with pytest.raises(runtime.SecurityError) as exc_info:
+        runtime._resolve_trusted_loader(loader, auto_accept=True, backend=None)
+
+    assert (
+        "invalid variable name" in str(exc_info.value).lower()
+        or "execution blocked" in str(exc_info.value).lower()
+    )
+
+
+def test_lib_support_deserializers_no_underscore_variables():
+    """Ensure lib_support.py deserializers don't use underscore-prefixed variable names.
+
+    RestrictedPython blocks variable assignments starting with underscore for security.
+    This test scans the lib_support.py source to catch any regressions.
+    """
+    import ast
+
+    lib_support_path = Path(__file__).resolve().parents[1] / "src" / "beaver" / "lib_support.py"
+    source = lib_support_path.read_text()
+
+    # Find all function definitions that look like deserializers
+    # (functions containing 'deserialize' in name or registered as TrustedLoader)
+    tree = ast.parse(source)
+
+    underscore_vars = []
+    for node in ast.walk(tree):
+        # Check Name nodes in Store context (variable assignments)
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Store)
+            and node.id.startswith("_")
+            and not node.id.startswith("__")
+        ):
+            underscore_vars.append(node.id)
+        # Check imports with underscore aliases: "from x import Y as _Z"
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.asname and alias.asname.startswith("_"):
+                    underscore_vars.append(f"import alias: {alias.asname}")
+
+    # Filter to only report unique issues
+    underscore_vars = list(set(underscore_vars))
+
+    # Allow internal implementation details (class names, private methods)
+    # but flag anything that would appear in deserializer function bodies
+    forbidden = [v for v in underscore_vars if v not in {"_LazyLoaderSpec", "_SPECS"}]
+
+    assert not forbidden, (
+        f"lib_support.py contains underscore-prefixed variables that will break "
+        f"RestrictedPython: {forbidden}. Rename to remove underscore prefix."
+    )
+
+
 def test_sender_verification_rejects_spoofed_sender(tmp_path):
     """read_envelope_verified should reject envelopes with spoofed sender."""
     try:

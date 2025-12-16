@@ -1044,7 +1044,7 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
             if resp not in ("y", "yes"):
                 raise RuntimeError("Loader not approved")
         # Build scope with common imports that deserializers might need
-        scope: Dict[str, Any] = {"TrustedLoader": TrustedLoader}
+        scope: Dict[str, Any] = {"TrustedLoader": TrustedLoader, "Path": Path}
         # Try to import anndata (common for AnnData loaders)
         try:
             import anndata as ad
@@ -1071,8 +1071,9 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
             pass
 
         # Inject metadata if available (eliminates need for .meta.json files)
+        # Note: avoid underscore prefix as RestrictedPython blocks such names
         if meta is not None:
-            scope["_beaver_meta"] = meta
+            scope["beaver_meta"] = meta
 
         # Static analysis to block dangerous imports/calls
         _analyze_loader_source(src, allowed_imports=_ALLOWED_LOADER_MODULES)
@@ -1136,9 +1137,10 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
 
         # Attach merged symbols onto scope to allow callers to access derived functions/objects
         scope.update(safe_symbols)
-        # Exclude TrustedLoader class and imported modules - we want the actual deserializer function
+        # Exclude TrustedLoader class, Path, and imported modules - we want the actual deserializer function
         excluded = {
             TrustedLoader,
+            Path,
             scope.get("ad"),
             scope.get("pd"),
             scope.get("np"),

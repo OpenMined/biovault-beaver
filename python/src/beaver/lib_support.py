@@ -82,9 +82,9 @@ def _register_pandas(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any
     def pandas_serialize_file(frame_like: Any, path: Path) -> dict:
         """Serialize pandas object to parquet. Returns metadata dict."""
         _require("pyarrow", feature="pandas parquet serialization")
-        from pathlib import Path as _Path
+        from pathlib import Path as PathCls
 
-        path = _Path(path)
+        path = PathCls(path)
         if isinstance(frame_like, pd.DataFrame):
             meta = {"kind": "dataframe"}
             frame_like.to_parquet(path, index=True, engine="pyarrow")
@@ -119,31 +119,34 @@ def _register_pandas(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any
                 "pyarrow is required to deserialize pandas parquet payloads. "
                 'Install with `pip install "biovault-beaver[lib-support]"`.'
             ) from exc
-        from pathlib import Path as _Path
+        # Use Path from globals (injected by runtime) to avoid RestrictedPython import issues
+        # Fall back to import if not available (e.g., direct function call outside runtime)
+        Path = globals().get("Path")  # noqa: N806
+        if Path is None:
+            from pathlib import Path
+        path = Path(path)
 
-        path = _Path(path)
-
-        # If meta not passed, try to get from _beaver_meta (injected) or .meta.json file
+        # If meta not passed, try to get from beaver_meta (injected) or .meta.json file
         if meta is None:
-            _injected_meta = globals().get("_beaver_meta")
-            if _injected_meta is not None:
-                meta = _injected_meta
+            injected_meta = globals().get("beaver_meta")
+            if injected_meta is not None:
+                meta = injected_meta
             else:
                 # Fallback: read from .meta.json file (legacy support)
                 import json as json_local
 
                 meta_path = path.with_suffix(path.suffix + ".meta.json")
-                _read_text_fn = globals().get("_beaver_read_text")
-                if _read_text_fn is not None:
-                    meta_text = _read_text_fn(str(meta_path))
+                read_text_fn = globals().get("beaver_read_text")
+                if read_text_fn is not None:
+                    meta_text = read_text_fn(str(meta_path))
                 else:
                     meta_text = meta_path.read_text()
                 meta = json_local.loads(meta_text)
 
         # Read parquet data (may be encrypted)
-        _read_bytes_fn = globals().get("_beaver_read_bytes")
-        if _read_bytes_fn is not None:
-            parquet_bytes = _read_bytes_fn(str(path))
+        read_bytes_fn = globals().get("beaver_read_bytes")
+        if read_bytes_fn is not None:
+            parquet_bytes = read_bytes_fn(str(path))
             parquet_buffer = io_local.BytesIO(parquet_bytes)
         else:
             parquet_buffer = path

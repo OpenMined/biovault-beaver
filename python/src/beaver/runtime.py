@@ -34,10 +34,8 @@ class SecurityError(Exception):
 
 
 try:  # pragma: no cover
-    from pyfory.error import TypeNotCompatibleError
     from pyfory.serializer import DataClassSerializer
 except Exception:  # pragma: no cover
-    TypeNotCompatibleError = None  # type: ignore[assignment]
     DataClassSerializer = None  # type: ignore[assignment]
 
 
@@ -1029,8 +1027,10 @@ def unpack(
     try:
         obj = _loads_with(compatible=fory_compatible, field_nullable=fory_field_nullable)
     except Exception as e:
-        original_exc = e
-        original_msg = str(e)
+        primary_exc = e
+        primary_msg = str(e)
+        last_exc = e
+        last_msg = primary_msg
 
         def _looks_like_out_of_bound(msg: str) -> bool:
             return "out of bound" in msg or "read_varuint32" in msg
@@ -1038,6 +1038,7 @@ def unpack(
         def _looks_like_hash_mismatch(msg: str) -> bool:
             return "Hash " in msg and "not consistent with" in msg and "beaver." in msg
 
+        fallback_failures: list[str] = []
         attempts: list[str] = [
             f"compatible={fory_compatible} field_nullable={fory_field_nullable} (primary)"
         ]
@@ -1049,19 +1050,20 @@ def unpack(
             fory_compatible
             and compatible_env is None
             and sender_compatible is None
-            and _looks_like_out_of_bound(original_msg)
+            and _looks_like_out_of_bound(last_msg)
         ):
             try:
                 attempts.append("compatible=False field_nullable=False (fallback legacy)")
                 obj = _loads_with(compatible=False, field_nullable=False)
             except Exception as retry_exc:
-                original_exc = retry_exc
-                original_msg = str(retry_exc)
+                last_exc = retry_exc
+                last_msg = str(retry_exc)
+                fallback_failures.append(f"legacy->non-compatible failed: {last_msg}")
 
         # Legacy non-compatible payloads can fail on internal-type schema hash mismatches.
         attempted_legacy_fallback = any("fallback legacy" in a for a in attempts)
         if (not fory_compatible or attempted_legacy_fallback) and _looks_like_hash_mismatch(
-            original_msg
+            last_msg
         ):
             try:
                 attempts.append(
@@ -1073,11 +1075,14 @@ def unpack(
                     lenient_internal_hash=True,
                 )
             except Exception as retry_exc:
-                original_exc = retry_exc
-                original_msg = str(retry_exc)
+                last_exc = retry_exc
+                last_msg = str(retry_exc)
+                fallback_failures.append(f"legacy->lenient-internal-hash failed: {last_msg}")
 
         if "obj" not in locals():
-            msg = original_msg
+            msg = primary_msg
+            if fallback_failures:
+                msg += " (fallback failures: " + " | ".join(fallback_failures) + ")"
             if _looks_like_hash_mismatch(msg):
                 sender_py = (envelope.manifest or {}).get("python_version")
                 sender_pf = (envelope.manifest or {}).get("pyfory_version")
@@ -1104,7 +1109,7 @@ def unpack(
                     + ".)"
                 )
             msg += f" (attempts: {', '.join(attempts)})"
-            raise SecurityError(f"Deserialization blocked by policy: {msg}") from original_exc
+            raise SecurityError(f"Deserialization blocked by policy: {msg}") from last_exc
     obj = _resolve_trusted_loader(
         obj, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
     )
@@ -1821,7 +1826,14 @@ def list_inbox(inbox: Path | str, *, backend=None) -> list[BeaverEnvelope]:
     """
     inbox_path = Path(inbox)
     envelopes = []
-    for p in sorted(inbox_path.glob("*.beaver")):
+
+    # Collect all .beaver files from root and data/ subdirectory
+    beaver_files = list(inbox_path.glob("*.beaver"))
+    data_dir = inbox_path / "data"
+    if data_dir.exists():
+        beaver_files.extend(data_dir.glob("*.beaver"))
+
+    for p in sorted(beaver_files):
         try:
             if backend is not None and backend.uses_crypto:
                 # Use backend to decrypt encrypted files

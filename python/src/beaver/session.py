@@ -925,19 +925,27 @@ rules:
                     if not load:
                         return entry
 
-                    # Avoid injecting into beaver.session module globals; return the value to caller.
+                    from .remote_vars import NotReady
+
                     value = entry.load(
                         inject=False,
                         auto_accept=auto_accept,
                         trust_loader=trust_loader,
                     )
-                    if value is entry and getattr(entry, "_last_error", None) is not None:
-                        # Make permanent deserialization failures obvious (otherwise we just time out).
-                        raise RuntimeError(
-                            f"Remote var '{name}' exists but could not be loaded: {entry._last_error}"
-                        )
-                    if value is not None:
-                        return value
+                    if isinstance(value, NotReady):
+                        # Data exists but isn't locally available yet (sync/decrypt pending).
+                        continue
+
+                    if value is entry:
+                        if getattr(entry, "_last_error", None) is not None:
+                            raise RuntimeError(
+                                f"Remote var '{name}' exists but could not be loaded: {entry._last_error}"
+                            )
+                        # Pointer-only or metadata-only; keep waiting.
+                        continue
+
+                    # Value may legitimately be None (published NoneType); return it.
+                    return value
             except RuntimeError:
                 # Surface permanent load errors (deserialization policy, schema mismatch, etc.)
                 raise
@@ -1011,11 +1019,15 @@ rules:
                 # Encrypt for the peer who will read this data
                 recipients = [self.peer]
 
+        # Use data/ subdirectory for all beaver files
+        data_dir = self._local_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+
         env = pack(
             obj,
             sender=self.owner,
             name=name,
-            artifact_dir=self._local_path,
+            artifact_dir=data_dir,
             backend=backend,
             recipients=recipients,
         )
@@ -1039,8 +1051,7 @@ rules:
                 "payload_b64": base64.b64encode(env.payload).decode("ascii"),
             }
             content = json.dumps(record, indent=2).encode("utf-8")
-            self._local_path.mkdir(parents=True, exist_ok=True)
-            path = self._local_path / env.filename()
+            path = data_dir / env.filename()
             backend.storage.write_with_shadow(
                 str(path),
                 content,
@@ -1048,8 +1059,8 @@ rules:
                 hint="beaver-envelope",
             )
         else:
-            # Write to our session folder (peer can read it)
-            path = write_envelope(env, out_dir=self._local_path)
+            # Write to our session data folder (peer can read it)
+            path = write_envelope(env, out_dir=data_dir)
         print(f"📤 Sent to session: {path.name}")
 
         return SendResult(path=path, envelope=env)

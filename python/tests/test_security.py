@@ -332,6 +332,76 @@ def test_lib_support_deserializers_no_underscore_variables():
     )
 
 
+def test_data_location_path_traversal_attack_blocked():
+    """data_location in remote_vars must reject absolute paths and path traversal.
+
+    Attack scenario: A malicious sender could craft a remote_vars.json with
+    data_location pointing to sensitive files like ~/.ssh/id_rsa or /etc/passwd.
+    When the receiver's code tries to "load" this var, it could read arbitrary files.
+    """
+    from beaver.remote_vars import DataLocationSecurityError, _sanitize_data_location
+
+    # Attack 1: Absolute Unix path to steal SSH keys
+    with pytest.raises(DataLocationSecurityError):
+        _sanitize_data_location("/Users/victim/.ssh/id_rsa", base_dir=Path("/some/session"))
+
+    # Attack 2: Absolute Windows path
+    with pytest.raises(DataLocationSecurityError):
+        _sanitize_data_location("C:\\Users\\victim\\secrets.txt", base_dir=Path("/some/session"))
+
+    # Attack 3: Path traversal to escape session directory
+    with pytest.raises(DataLocationSecurityError):
+        _sanitize_data_location("../../../etc/passwd", base_dir=Path("/some/session"))
+
+    # Attack 4: Windows-style path traversal
+    with pytest.raises(DataLocationSecurityError):
+        _sanitize_data_location(
+            "..\\..\\..\\Windows\\System32\\config\\SAM", base_dir=Path("/some/session")
+        )
+
+    # Attack 5: Encoded traversal attempts
+    with pytest.raises(DataLocationSecurityError):
+        _sanitize_data_location("data/..%2F..%2Fetc/passwd", base_dir=Path("/some/session"))
+
+    # Attack 6: Null byte injection (could truncate path in some systems)
+    with pytest.raises(DataLocationSecurityError):
+        _sanitize_data_location("data/safe.beaver\x00/etc/passwd", base_dir=Path("/some/session"))
+
+
+def test_data_location_valid_relative_paths():
+    """Valid relative paths should be accepted and normalized to Unix-style."""
+    from beaver.remote_vars import _sanitize_data_location
+
+    base = Path("/sessions/abc123")
+
+    # Simple filename
+    result = _sanitize_data_location("file.beaver", base_dir=base)
+    assert result == "file.beaver"
+
+    # Path in data subdirectory
+    result = _sanitize_data_location("data/4c1b51ae.beaver", base_dir=base)
+    assert result == "data/4c1b51ae.beaver"
+
+    # Windows-style separators should be normalized to Unix
+    result = _sanitize_data_location("data\\subdir\\file.beaver", base_dir=base)
+    assert result == "data/subdir/file.beaver"
+
+
+def test_data_location_resolves_correctly_on_read():
+    """When reading, relative data_location should resolve against session dir."""
+    from beaver.remote_vars import _resolve_data_location
+
+    # Unix system
+    session_dir = Path(
+        "/Users/madhavajay/Desktop/BioVault/datasites/me@madhavajay.com/shared/biovault/sessions/abc123"
+    )
+    relative = "data/4c1b51ae.beaver"
+
+    result = _resolve_data_location(relative, session_dir=session_dir)
+    expected = session_dir / "data" / "4c1b51ae.beaver"
+    assert result == expected
+
+
 def test_sender_verification_rejects_spoofed_sender(tmp_path):
     """read_envelope_verified should reject envelopes with spoofed sender."""
     try:

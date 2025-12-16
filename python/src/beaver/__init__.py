@@ -19,7 +19,7 @@ from .policy import (
     BeaverPolicy,
 )
 from .remote_data import get_current_owner
-from .remote_vars import RemoteVar, RemoteVarRegistry, RemoteVarView
+from .remote_vars import NotReady, RemoteVar, RemoteVarRegistry, RemoteVarView
 from .runtime import (
     BeaverContext,
     InboxView,

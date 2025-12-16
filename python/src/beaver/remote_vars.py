@@ -6,6 +6,8 @@ import contextlib
 import importlib
 import importlib.metadata
 import json
+import os
+import warnings
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +21,6 @@ def _iso_now() -> str:
 
 def _is_uv_venv() -> bool:
     """Check if we're running in a uv-managed virtual environment."""
-    import os
     import sys
 
     # Check for uv marker file in the venv
@@ -141,6 +142,15 @@ def _detect_dependencies(obj: Any) -> Dict[str, str]:
         add("numpy")
 
     return deps
+
+
+def _in_ipython() -> bool:
+    try:
+        from IPython import get_ipython  # type: ignore
+
+        return get_ipython() is not None
+    except Exception:
+        return False
 
 
 class _SafeDisplayProxy:
@@ -1560,6 +1570,23 @@ class RemoteVarPointer:
             # For permanent errors, inject pointer and return self
             if is_transient:
                 return None
+
+            # Permanent load error: surface loudly in notebooks so it doesn't get missed.
+            last_error = getattr(self, "_last_error", None)
+            if last_error is not None:
+                msg = (
+                    f"Remote Twin '{var_name}' is published but could not be deserialized.\n"
+                    f"  Owner: {self.remote_var.owner}\n"
+                    f"  Location: {self.remote_var.data_location}\n"
+                    f"  Error: {last_error}\n"
+                    f"  Hint: ensure sender/receiver have compatible pyfory+Beaver runtime "
+                    f"(try `BEAVER_FORY_COMPATIBLE=1` on both sides, then republish).\n"
+                )
+                warnings.warn(msg, RuntimeWarning, stacklevel=2)
+                if _in_ipython():
+                    raise RuntimeError(msg) from (
+                        last_error if isinstance(last_error, Exception) else None
+                    )
 
             if inject:
                 import inspect

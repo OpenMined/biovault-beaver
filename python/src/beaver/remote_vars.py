@@ -18,6 +18,19 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _cross_platform_filename(path_str: str) -> str:
+    """Extract filename from a path that may be Windows or Unix format.
+
+    On POSIX systems, Path("C:\\Users\\...\\file.txt").name returns the entire
+    string because backslashes aren't path separators. This function handles
+    both Windows and Unix paths correctly on any platform.
+    """
+    if not path_str:
+        return path_str
+    normalized = path_str.replace("\\", "/")
+    return normalized.rsplit("/", 1)[-1]
+
+
 class DataLocationSecurityError(Exception):
     """Raised when data_location contains a path traversal or absolute path attack."""
 
@@ -1407,8 +1420,8 @@ class RemoteVarPointer:
                 else:
                     # Legacy format: absolute path from sender's system
                     # Extract just the filename and look in our local data directory
-                    stored_path = Path(data_location)
-                    filename = stored_path.name
+                    # Use cross-platform extraction since Path.name fails for Windows paths on POSIX
+                    filename = _cross_platform_filename(data_location)
 
                     # Primary: use our local view's data directory
                     if hasattr(self.view, "data_dir"):
@@ -1417,12 +1430,12 @@ class RemoteVarPointer:
                         data_path = Path(self.view.registry_path).parent / "data" / filename
                     else:
                         # Last resort: try the absolute path (unlikely to work cross-platform)
-                        data_path = stored_path
+                        data_path = Path(data_location)
 
                     # Fallback: translate stored path to our local view (legacy interop)
                     # Pattern: /sandbox/<owner>/datasites/<datasite>/... or C:\...\datasites\...
                     if not data_path.exists():
-                        stored_str = str(stored_path)
+                        stored_str = data_location
                         # Try to find datasites in any format (Windows or Unix)
                         idx = -1
                         for sep in ["/datasites/", "\\datasites\\", "/datasites\\", "\\datasites/"]:
@@ -1689,8 +1702,8 @@ class RemoteVarPointer:
                 try:
                     from .runtime import read_envelope
 
-                    stored_path = Path(self.remote_var.data_location)
-                    filename = stored_path.name
+                    # Use cross-platform extraction since Path.name fails for Windows paths on POSIX
+                    filename = _cross_platform_filename(self.remote_var.data_location)
 
                     # Use our local view's data directory
                     if hasattr(self.view, "data_dir"):
@@ -1698,7 +1711,7 @@ class RemoteVarPointer:
                     elif hasattr(self.view, "registry_path"):
                         data_path = Path(self.view.registry_path).parent / "data" / filename
                     else:
-                        data_path = stored_path
+                        data_path = Path(self.remote_var.data_location)
 
                     # Try by name if not found
                     if not data_path.exists() and hasattr(self.view, "data_dir"):
@@ -1834,8 +1847,8 @@ class RemoteVarPointer:
             expected_local_exists = None
             if self.remote_var.data_location:
                 try:
-                    stored_path = Path(self.remote_var.data_location)
-                    filename = stored_path.name
+                    # Use cross-platform extraction since Path.name fails for Windows paths on POSIX
+                    filename = _cross_platform_filename(self.remote_var.data_location)
                     if hasattr(self.view, "data_dir"):
                         data_path = Path(self.view.data_dir) / filename
                     elif hasattr(self.view, "registry_path"):

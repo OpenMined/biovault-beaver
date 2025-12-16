@@ -405,6 +405,74 @@ def test_data_location_resolves_correctly_on_read(tmp_path):
     assert result == expected
 
 
+def test_trusted_loader_translates_windows_datasites_path(tmp_path):
+    """TrustedLoader artifact paths should translate from sender to receiver view."""
+
+    class DummyBackend:
+        def __init__(self, data_dir: Path):
+            self.data_dir = data_dir
+            self.uses_crypto = False
+
+    backend = DummyBackend(tmp_path)
+    loader = {
+        "_trusted_loader": True,
+        "path": (
+            "C:\\Users\\azureuser\\Desktop\\BioVault\\datasites\\me@example.com\\shared\\biovault\\"
+            "sessions\\abc123\\data\\stocks_public.bin"
+        ),
+        "deserializer_src": "def load(p):\n    return p\n",
+        "name": "pandas.core.frame.DataFrame",
+    }
+
+    resolved = runtime._resolve_trusted_loader(
+        loader, auto_accept=True, backend=backend, trust_loader=False
+    )
+    assert (
+        str(resolved)
+        .replace("\\", "/")
+        .endswith(
+            "/datasites/me@example.com/shared/biovault/sessions/abc123/data/stocks_public.bin"
+        )
+    )
+
+
+def test_trusted_loader_paths_are_posix_and_relative_with_artifact_dir(tmp_path):
+    """TrustedLoader artifact paths should be unix-style and relative when artifact_dir is provided."""
+    np = pytest.importorskip("numpy")
+    arr = np.array([1, 2, 3])
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    loader = runtime._prepare_for_sending(arr, artifact_dir=data_dir, name_hint="arr")  # type: ignore[attr-defined]
+    assert isinstance(loader, dict) and loader.get("_trusted_loader") is True
+    path = loader.get("path")
+    assert isinstance(path, str)
+    assert "\\" not in path
+    assert not path.startswith("/")
+    assert ":" not in path
+    assert path.startswith("data/")
+
+
+def test_trusted_loader_relative_path_resolves_against_envelope_path(tmp_path):
+    """Relative TrustedLoader paths should resolve against the source envelope directory."""
+    session_dir = tmp_path / "sessions" / "abc123" / "data"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    artifact = session_dir / "artifact.bin"
+    artifact.write_bytes(b"ok")
+    env_path = session_dir / "env.beaver"
+    env_path.write_text("{}")
+
+    loader = {
+        "_trusted_loader": True,
+        "path": "data/artifact.bin",
+        "deserializer_src": "def load(p):\n    return p\n",
+        "name": "test.loader",
+    }
+    resolved = runtime._resolve_trusted_loader(
+        loader, auto_accept=True, backend=None, trust_loader=False, envelope_path=env_path
+    )
+    assert str(resolved) == str(artifact)
+
+
 def test_sender_verification_rejects_spoofed_sender(tmp_path):
     """read_envelope_verified should reject envelopes with spoofed sender."""
     try:

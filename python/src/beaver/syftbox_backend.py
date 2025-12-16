@@ -221,7 +221,10 @@ class SyftBoxBackend:
             # Plaintext read
             data = bytes(self.storage.read_bytes(str(path)))
 
-        return _deserialize_envelope(data)
+        env = _deserialize_envelope(data)
+        # Non-serialized hint used to resolve TrustedLoader relative artifact paths.
+        env._path = str(path)  # type: ignore[attr-defined]
+        return env
 
     def read_envelope_verified(
         self, path: Path | str, verify: bool = True
@@ -263,6 +266,8 @@ class SyftBoxBackend:
             fingerprint = "(none)"
 
         envelope = _deserialize_envelope(data)
+        # Non-serialized hint used to resolve TrustedLoader relative artifact paths.
+        envelope._path = str(path)  # type: ignore[attr-defined]
 
         # Verify sender if crypto is enabled and file was encrypted
         if (

@@ -15,7 +15,7 @@ import types
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional
 from uuid import uuid4
 
 from . import lib_support
@@ -109,7 +109,7 @@ class TrustedLoader:
     The first decorator sets the serializer, the second sets the deserializer.
     """
 
-    _handlers: Dict[type, Dict[str, Any]] = {}
+    _handlers: dict[type, dict[str, Any]] = {}
 
     @classmethod
     def register(cls, typ: type, *, name: Optional[str] = None):
@@ -131,7 +131,7 @@ class TrustedLoader:
         return deco
 
     @classmethod
-    def get(cls, typ: type, *, auto_register: bool = True) -> Optional[Dict[str, Any]]:
+    def get(cls, typ: type, *, auto_register: bool = True) -> Optional[dict[str, Any]]:
         h = cls._handlers.get(typ)
         if h and h.get("serializer") and h.get("deserializer"):
             return h
@@ -1388,7 +1388,7 @@ def _resolve_trusted_loader(
             if resp not in ("y", "yes"):
                 raise RuntimeError("Loader not approved")
         # Build scope with common imports that deserializers might need
-        scope: Dict[str, Any] = {"TrustedLoader": TrustedLoader, "Path": Path}
+        scope: dict[str, Any] = {"TrustedLoader": TrustedLoader, "Path": Path}
         # Try to import anndata (common for AnnData loaders)
         try:
             import anndata as ad
@@ -1967,7 +1967,7 @@ def load_by_id(
     globals_ns: Optional[dict] = None,
     strict: bool = False,
     policy=None,
-) -> Tuple[Optional[BeaverEnvelope], Optional[Any]]:
+) -> tuple[Optional[BeaverEnvelope], Optional[Any]]:
     """Load and inject an envelope payload by id into caller's globals."""
     env = find_by_id(inbox, envelope_id)
     if env is None:
@@ -2205,9 +2205,9 @@ def _install_builtin_aliases() -> None:
         "Optional": typing.Optional,
         "Union": typing.Union,
         "Any": typing.Any,
-        "Tuple": typing.Tuple,
-        "List": typing.List,
-        "Dict": typing.Dict,
+        "Tuple": tuple,
+        "List": list,
+        "Dict": dict,
     }
     for name, obj in aliases.items():
         if not hasattr(builtins, name):
@@ -2224,7 +2224,7 @@ def listen_once(
     strict: bool = False,
     policy=None,
     delete_after: bool = False,
-) -> Tuple[Optional[BeaverEnvelope], Optional[Any], Optional[Any]]:
+) -> tuple[Optional[BeaverEnvelope], Optional[Any], Optional[Any]]:
     """
     Process the oldest .beaver file in inbox once.
 
@@ -2748,7 +2748,7 @@ def wait_for_reply(
     strict: bool = False,
     policy=None,
     delete_after: bool = False,
-) -> Tuple[Optional[BeaverEnvelope], Optional[Any]]:
+) -> tuple[Optional[BeaverEnvelope], Optional[Any]]:
     """
     Poll an inbox for a reply envelope whose reply_to matches.
     """

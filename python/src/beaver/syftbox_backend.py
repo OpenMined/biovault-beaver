@@ -11,7 +11,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Optional
 
 import beaver
 
@@ -163,7 +163,7 @@ class SyftBoxBackend:
     def write_envelope(
         self,
         envelope: BeaverEnvelope,
-        recipients: List[str],
+        recipients: list[str],
         filename: Optional[str] = None,
     ) -> Path:
         """
@@ -228,7 +228,7 @@ class SyftBoxBackend:
 
     def read_envelope_verified(
         self, path: Path | str, verify: bool = True
-    ) -> Tuple[BeaverEnvelope, str, str]:
+    ) -> tuple[BeaverEnvelope, str, str]:
         """
         Read envelope and verify sender identity cryptographically.
 
@@ -283,7 +283,7 @@ class SyftBoxBackend:
         self,
         relative_path: str,
         data: bytes,
-        recipients: Optional[List[str]] = None,
+        recipients: Optional[list[str]] = None,
     ) -> Path:
         """
         Write bytes to user's shared folder.
@@ -329,7 +329,7 @@ class SyftBoxBackend:
         else:
             return bytes(self.storage.read_bytes(str(path)))
 
-    def list_envelopes(self, peer_email: Optional[str] = None) -> List[Path]:
+    def list_envelopes(self, peer_email: Optional[str] = None) -> list[Path]:
         """
         List .beaver files in a shared folder.
 
@@ -347,7 +347,7 @@ class SyftBoxBackend:
 
         return sorted(peer_shared.glob("*.beaver"))
 
-    def list_peer_envelopes(self, peer_email: str) -> List[Path]:
+    def list_peer_envelopes(self, peer_email: str) -> list[Path]:
         """
         List .beaver files in peer's shared folder.
 
@@ -486,7 +486,7 @@ class SyftBoxBackend:
 
         return request_file
 
-    def list_session_requests(self) -> List[SessionRequest]:
+    def list_session_requests(self) -> list[SessionRequest]:
         """
         List pending session requests in our RPC folder.
 

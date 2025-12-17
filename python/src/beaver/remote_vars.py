@@ -10,7 +10,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 
@@ -339,13 +339,13 @@ def _prompt_install_deps(missing: list[str], var_name: str) -> bool:
         return False
 
 
-def _detect_dependencies(obj: Any) -> Dict[str, str]:
+def _detect_dependencies(obj: Any) -> dict[str, str]:
     """
     Best-effort dependency detection for shared objects.
 
     Captures key package versions so receivers know what to install to load.
     """
-    deps: Dict[str, str] = {}
+    deps: dict[str, str] = {}
 
     def add(pkg: str):
         try:
@@ -456,7 +456,7 @@ class RemoteVar:
     updated_at: str = field(default_factory=_iso_now)
     data_location: Optional[str] = None  # Path to actual .beaver file if sent
     _stored_value: Optional[Any] = None  # Actual value for simple types
-    deps: Dict[str, str] = field(default_factory=dict)  # dependency versions for loaders
+    deps: dict[str, str] = field(default_factory=dict)  # dependency versions for loaders
 
     def __repr__(self) -> str:
         type_info = self.var_type
@@ -516,7 +516,7 @@ class RemoteVarRegistry:
         self.session_id = session_id
         self._context = context
         self.peer = peer  # For session encryption
-        self.vars: Dict[str, RemoteVar] = {}
+        self.vars: dict[str, RemoteVar] = {}
         self._load()
 
     def _load(self):
@@ -1248,7 +1248,7 @@ class RemoteVarView:
         self.data_dir = Path(data_dir)
         self.context = context
         self.session = session  # Store session reference
-        self.vars: Dict[str, RemoteVar] = {}
+        self.vars: dict[str, RemoteVar] = {}
         self.refresh()
 
     def refresh(self):

@@ -7,7 +7,7 @@ import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 from uuid import uuid4
 
 import yaml
@@ -36,7 +36,7 @@ class DatasetRegistry:
         self._base_dir = Path(base_dir)
         self._backend = backend
         self._mapping_store = mapping_store
-        self._owner_cache: Dict[str, _DatasetOwnerView] = {}
+        self._owner_cache: dict[str, _DatasetOwnerView] = {}
 
     def owners(self) -> Iterable[str]:
         """List owners that have a datasets.yaml index."""
@@ -52,9 +52,9 @@ class DatasetRegistry:
                 owners.append(owner_dir.name)
         return owners
 
-    def list(self) -> Dict[str, Iterable[str]]:
+    def list(self) -> dict[str, Iterable[str]]:
         """List datasets per owner."""
-        result: Dict[str, Iterable[str]] = {}
+        result: dict[str, Iterable[str]] = {}
         for owner in self.owners():
             result[owner] = builtins.list(self[owner].names())
         return result
@@ -139,8 +139,8 @@ class _DatasetOwnerView:
         self._index_path = (
             self._base_dir / "datasites" / owner / "public" / "biovault" / "datasets.yaml"
         )
-        self._index_cache: Optional[Dict[str, _DatasetResource]] = None
-        self._dataset_cache: Dict[str, Dataset] = {}
+        self._index_cache: Optional[dict[str, _DatasetResource]] = None
+        self._dataset_cache: dict[str, Dataset] = {}
         self._mapping_store = mapping_store
 
     def names(self) -> Iterable[str]:
@@ -178,11 +178,11 @@ class _DatasetOwnerView:
                 return twin
         return None
 
-    def _load_index(self) -> Dict[str, _DatasetResource]:
+    def _load_index(self) -> dict[str, _DatasetResource]:
         if self._index_cache is not None:
             return self._index_cache
 
-        resources: Dict[str, _DatasetResource] = {}
+        resources: dict[str, _DatasetResource] = {}
         if not self._index_path.exists():
             self._index_cache = resources
             return resources
@@ -261,8 +261,8 @@ class Dataset:
         self.manifest_path = Path(manifest_path)
         self._base_dir = Path(base_dir)
         self._manifest = self._load_manifest(self.manifest_path)
-        self._asset_cache: Dict[str, Twin] = {}
-        self._asset_ids: Dict[str, str] = {}
+        self._asset_cache: dict[str, Twin] = {}
+        self._asset_ids: dict[str, str] = {}
         self._mapping_store = mapping_store or MappingStore.from_env(allow_missing=True)
         self._private_mappings = self._load_private_mappings()
         for key, asset in (self._manifest.get("assets") or {}).items():
@@ -300,13 +300,13 @@ class Dataset:
         data = yaml.safe_load(raw) or {}
         return data
 
-    def _load_private_mappings(self) -> Dict[str, Path]:
+    def _load_private_mappings(self) -> dict[str, Path]:
         """
         Load private URL -> local path mappings from BIOVAULT_HOME/mapping.yaml.
         Format:
             syft://.../private/...: /absolute/or/relative/path
         """
-        mappings: Dict[str, Path] = {}
+        mappings: dict[str, Path] = {}
         if not self._mapping_store:
             return mappings
         for k, v in self._mapping_store.all().items():
@@ -588,7 +588,7 @@ def _get_default_registry() -> DatasetRegistry:
     return _default_registry
 
 
-def list() -> Dict[str, Iterable[str]]:
+def list() -> dict[str, Iterable[str]]:
     """
     List datasets per owner using the default registry.
 

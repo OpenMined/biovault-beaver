@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Optional
 from uuid import uuid4
 
 if TYPE_CHECKING:
@@ -48,8 +48,8 @@ def _pkg_version(name: str) -> Optional[str]:
         return None
 
 
-def _version_info() -> Dict[str, Optional[str]]:
-    info: Dict[str, Optional[str]] = {}
+def _version_info() -> dict[str, Optional[str]]:
+    info: dict[str, Optional[str]] = {}
     info["beaver"] = _pkg_version("biovault-beaver") or _pkg_version("beaver")
     info["syftbox_sdk"] = _pkg_version("syftbox-sdk")
     info["python"] = sys.version.split()[0]
@@ -251,13 +251,13 @@ class Session:
     created_at: str = field(default_factory=_iso_now)
     accepted_at: Optional[str] = None
     status: str = "pending"  # pending, active, closed
-    datasets: List[SessionDatasetInfo] = field(default_factory=list)  # Associated datasets
+    datasets: list[SessionDatasetInfo] = field(default_factory=list)  # Associated datasets
 
     # Internal references
     _context: Optional[BeaverContext] = field(default=None, repr=False)
     _local_path: Optional[Path] = field(default=None, repr=False)
     _peer_path: Optional[Path] = field(default=None, repr=False)
-    _datasets_cache: Dict[str, Dataset] = field(default_factory=dict, repr=False)
+    _datasets_cache: dict[str, Dataset] = field(default_factory=dict, repr=False)
 
     @property
     def context(self) -> Optional[BeaverContext]:
@@ -331,7 +331,7 @@ class Session:
         self._datasets_cache[cache_key] = dataset
         return dataset
 
-    def get_datasets(self) -> Dict[str, Dataset]:
+    def get_datasets(self) -> dict[str, Dataset]:
         """
         Get all datasets associated with this session.
 
@@ -359,7 +359,7 @@ class Session:
 
         return result
 
-    def get_twins(self) -> Dict[str, Twin]:
+    def get_twins(self) -> dict[str, Twin]:
         """
         Get all assets from all associated datasets as Twins.
 
@@ -1179,7 +1179,7 @@ rules:
 class SessionRequestsView:
     """Pretty-printable view of pending session requests."""
 
-    def __init__(self, requests: List[SessionRequest]):
+    def __init__(self, requests: list[SessionRequest]):
         self.requests = requests
 
     def __len__(self) -> int:

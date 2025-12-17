@@ -162,3 +162,134 @@ jobs:
 
       - name: Run security notebook test
         run: ./test_notebooks.sh notebooks/00-malicious.json
+
+  # SyftBox stack integration tests (real server + syncing clients)
+  syftbox-notebook-01-hello-beaver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
+          cache-dependency-path: syftbox/go.sum
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run syftbox notebook test
+        run: ./test_notebooks_syftbox.sh notebooks/01-hello-beaver.json
+
+  syftbox-notebook-02-advanced-features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
+          cache-dependency-path: syftbox/go.sum
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run syftbox notebook test
+        run: ./test_notebooks_syftbox.sh notebooks/02-advanced-features.json
+
+  syftbox-notebook-03-neural-network:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
+          cache-dependency-path: syftbox/go.sum
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run syftbox notebook test
+        run: ./test_notebooks_syftbox.sh notebooks/03-neural-network.json
+
+  syftbox-notebook-00-malicious:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
+          cache-dependency-path: syftbox/go.sum
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run syftbox security notebook test
+        run: ./test_notebooks_syftbox.sh notebooks/00-malicious.json
+
+  syftbox-notebook-04-sessions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: syftbox/go.mod
+          cache-dependency-path: syftbox/go.sum
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run syftbox notebook test
+        run: ./test_notebooks_syftbox.sh notebooks/04-sessions.json

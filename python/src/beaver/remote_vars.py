@@ -1781,6 +1781,7 @@ class RemoteVarPointer:
 
         # Check if this is a Twin type
         is_twin = self.remote_var.var_type.startswith("Twin[")
+        is_transient = False  # Default for non-Twin types
 
         if is_twin:
             # Try to load from published data location first

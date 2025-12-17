@@ -123,8 +123,10 @@ def _sync_twin_instances(twin_id: str, owner: str, source_twin):
         print(
             f"🔄 Synced {len(updated_vars)} variable(s) to canonical Twin: {', '.join(updated_vars)}"
         )
+        has_public = canonical.public is not None
+        has_private = canonical.private is not None
         print(
-            f"   Canonical has: public={'✓' if canonical.public else '✗'}, private={'✓' if canonical.private else '✗'}"
+            f"   Canonical has: public={'✓' if has_public else '✗'}, private={'✓' if has_private else '✗'}"
         )
 
     # Return the canonical Twin so caller can use it
@@ -297,12 +299,12 @@ class Twin(LiveMixin, RemoteData):
             # Merge public if existing lacks it
             elif existing_pub is None and self_pub is not None:
                 object.__setattr__(existing, "public", self_pub)
-                if hasattr(self, "public_stdout"):
-                    existing.public_stdout = getattr(self, "public_stdout", None)
-                if hasattr(self, "public_stderr"):
-                    existing.public_stderr = getattr(self, "public_stderr", None)
-                if hasattr(self, "public_figures"):
-                    existing.public_figures = getattr(self, "public_figures", None)
+                # Only overwrite captured outputs if new value is not None
+                # (preserve existing values during _prepare_for_sending merge)
+                for attr in ("public_stdout", "public_stderr", "public_figures"):
+                    new_val = getattr(self, attr, None)
+                    if new_val is not None:
+                        setattr(existing, attr, new_val)
 
             # Merge private if existing lacks it or only has placeholder request
             existing_priv = object.__getattribute__(existing, "private")
@@ -331,12 +333,12 @@ class Twin(LiveMixin, RemoteData):
                 existing_priv is None or is_placeholder or is_idempotent or is_stale_priv
             ) and self_priv is not None:
                 object.__setattr__(existing, "private", self_priv)
-                if hasattr(self, "private_stdout"):
-                    existing.private_stdout = getattr(self, "private_stdout", None)
-                if hasattr(self, "private_stderr"):
-                    existing.private_stderr = getattr(self, "private_stderr", None)
-                if hasattr(self, "private_figures"):
-                    existing.private_figures = getattr(self, "private_figures", None)
+                # Only overwrite captured outputs if new value is not None
+                # (preserve existing values during _prepare_for_sending merge)
+                for attr in ("private_stdout", "private_stderr", "private_figures"):
+                    new_val = getattr(self, attr, None)
+                    if new_val is not None:
+                        setattr(existing, attr, new_val)
 
             # Keep registry pointing at the original instance
             _TWIN_REGISTRY[key] = existing

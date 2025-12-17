@@ -438,6 +438,17 @@ def _validate_artifact_path(path: str | Path, *, backend=None) -> Path:
     with contextlib.suppress(Exception):
         bases.append(Path(__file__).resolve().parents[3])
     bases.append(Path(tempfile.gettempdir()))
+    # Detect SyftBox/BioVault root from "datasites" in path
+    # This handles cross-session artifact references within the same SyftBox installation
+    try:
+        parts = candidate.resolve().parts
+        if "datasites" in parts:
+            idx = parts.index("datasites")
+            syftbox_root = Path(*parts[:idx])
+            if syftbox_root.exists():
+                bases.append(syftbox_root)
+    except Exception:
+        pass
 
     resolved_candidate = candidate.resolve()
     for base in bases:
@@ -804,10 +815,14 @@ def _prepare_for_sending(
                 live_interval=obj.live_interval,
             )
 
-        # Copy serializable captured outputs
-        for attr in ("public_stdout", "public_stderr", "private_stdout", "private_stderr"):
+        # Copy serializable captured outputs (public always, private only if preserving)
+        for attr in ("public_stdout", "public_stderr"):
             if hasattr(obj, attr):
                 setattr(new_twin, attr, getattr(obj, attr))
+        if preserve_private:
+            for attr in ("private_stdout", "private_stderr"):
+                if hasattr(obj, attr):
+                    setattr(new_twin, attr, getattr(obj, attr))
 
         # Convert captured figures to serializable format (dicts with PNG bytes)
         def convert_figures_for_sending(figs):
@@ -826,7 +841,8 @@ def _prepare_for_sending(
 
         if hasattr(obj, "public_figures") and obj.public_figures:
             new_twin.public_figures = convert_figures_for_sending(obj.public_figures)
-        if hasattr(obj, "private_figures") and obj.private_figures:
+        # Only include private figures if preserving private data
+        if preserve_private and hasattr(obj, "private_figures") and obj.private_figures:
             new_twin.private_figures = convert_figures_for_sending(obj.private_figures)
 
         return new_twin
@@ -3857,9 +3873,13 @@ class BeaverContext:
             # Load the response
             obj = unpack(env, strict=self.strict, policy=self.policy, backend=self._backend)
 
-            # Update the twin's private value
+            # Update the twin's private value and captured outputs
             if hasattr(obj, "private"):
                 twin.private = obj.private
+                # Also copy captured outputs from the response
+                for attr in ("private_stdout", "private_stderr", "private_figures"):
+                    if hasattr(obj, attr):
+                        setattr(twin, attr, getattr(obj, attr))
             else:
                 twin.private = obj
 

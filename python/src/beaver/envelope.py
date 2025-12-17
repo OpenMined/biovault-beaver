@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 from uuid import UUID, uuid4
 
 
@@ -19,10 +19,10 @@ class BeaverEnvelope:
     sender: str = "unknown"
     created_at: str = field(default_factory=_iso_now)
     name: Optional[str] = None
-    inputs: List[str] = field(default_factory=list)
-    outputs: List[str] = field(default_factory=list)
-    requirements: List[str] = field(default_factory=list)
-    manifest: Dict[str, Any] = field(default_factory=dict)
+    inputs: list[str] = field(default_factory=list)
+    outputs: list[str] = field(default_factory=list)
+    requirements: list[str] = field(default_factory=list)
+    manifest: dict[str, Any] = field(default_factory=dict)
     payload: bytes = b""
     reply_to: Optional[str] = None
 

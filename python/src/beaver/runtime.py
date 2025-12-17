@@ -12,9 +12,10 @@ import tempfile
 import textwrap
 import time
 import types
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional
 from uuid import uuid4
 
 from . import lib_support
@@ -108,7 +109,7 @@ class TrustedLoader:
     The first decorator sets the serializer, the second sets the deserializer.
     """
 
-    _handlers: Dict[type, Dict[str, Any]] = {}
+    _handlers: dict[type, dict[str, Any]] = {}
 
     @classmethod
     def register(cls, typ: type, *, name: Optional[str] = None):
@@ -130,7 +131,7 @@ class TrustedLoader:
         return deco
 
     @classmethod
-    def get(cls, typ: type, *, auto_register: bool = True) -> Optional[Dict[str, Any]]:
+    def get(cls, typ: type, *, auto_register: bool = True) -> Optional[dict[str, Any]]:
         h = cls._handlers.get(typ)
         if h and h.get("serializer") and h.get("deserializer"):
             return h
@@ -1074,15 +1075,21 @@ def unpack(
         )
 
         # Register Beaver internal types.
+        from .computation import ComputationRequest
         from .live_var import LiveVar
         from .twin import Twin
 
         if lenient_internal_hash and _LenientDataClassSerializer is not None:
             f.register_type(Twin, serializer=_LenientDataClassSerializer(f, Twin))
             f.register_type(LiveVar, serializer=_LenientDataClassSerializer(f, LiveVar))
+            f.register_type(
+                ComputationRequest,
+                serializer=_LenientDataClassSerializer(f, ComputationRequest),
+            )
         else:
             f.register_type(Twin)
             f.register_type(LiveVar)
+            f.register_type(ComputationRequest)
 
         return f.loads(envelope.payload)
 
@@ -1381,7 +1388,7 @@ def _resolve_trusted_loader(
             if resp not in ("y", "yes"):
                 raise RuntimeError("Loader not approved")
         # Build scope with common imports that deserializers might need
-        scope: Dict[str, Any] = {"TrustedLoader": TrustedLoader, "Path": Path}
+        scope: dict[str, Any] = {"TrustedLoader": TrustedLoader, "Path": Path}
         # Try to import anndata (common for AnnData loaders)
         try:
             import anndata as ad
@@ -1960,7 +1967,7 @@ def load_by_id(
     globals_ns: Optional[dict] = None,
     strict: bool = False,
     policy=None,
-) -> Tuple[Optional[BeaverEnvelope], Optional[Any]]:
+) -> tuple[Optional[BeaverEnvelope], Optional[Any]]:
     """Load and inject an envelope payload by id into caller's globals."""
     env = find_by_id(inbox, envelope_id)
     if env is None:
@@ -2198,9 +2205,9 @@ def _install_builtin_aliases() -> None:
         "Optional": typing.Optional,
         "Union": typing.Union,
         "Any": typing.Any,
-        "Tuple": typing.Tuple,
-        "List": typing.List,
-        "Dict": typing.Dict,
+        "Tuple": tuple,
+        "List": list,
+        "Dict": dict,
     }
     for name, obj in aliases.items():
         if not hasattr(builtins, name):
@@ -2217,7 +2224,7 @@ def listen_once(
     strict: bool = False,
     policy=None,
     delete_after: bool = False,
-) -> Tuple[Optional[BeaverEnvelope], Optional[Any], Optional[Any]]:
+) -> tuple[Optional[BeaverEnvelope], Optional[Any], Optional[Any]]:
     """
     Process the oldest .beaver file in inbox once.
 
@@ -2741,7 +2748,7 @@ def wait_for_reply(
     strict: bool = False,
     policy=None,
     delete_after: bool = False,
-) -> Tuple[Optional[BeaverEnvelope], Optional[Any]]:
+) -> tuple[Optional[BeaverEnvelope], Optional[Any]]:
     """
     Poll an inbox for a reply envelope whose reply_to matches.
     """
@@ -3573,7 +3580,12 @@ class BeaverContext:
                         print(f"📬 Found existing message: {env.name or env.envelope_id[:12]}")
                         print(f"   From: {env.sender}")
                         if auto_load:
-                            obj = unpack(env, strict=self.strict, policy=self.policy)
+                            obj = unpack(
+                                env,
+                                strict=self.strict,
+                                policy=self.policy,
+                                backend=self._backend,
+                            )
                             return env, obj
                         return env
 
@@ -3591,22 +3603,27 @@ class BeaverContext:
         else:
             print("⏳ Waiting for any message...")
 
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            for inbox_path in candidate_inboxes:
-                for env in list_inbox(inbox_path, backend=self._backend):
-                    if env.envelope_id in seen_ids:
-                        continue  # Already seen
-                    seen_ids.add(env.envelope_id)
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                for inbox_path in candidate_inboxes:
+                    for env in list_inbox(inbox_path, backend=self._backend):
+                        if env.envelope_id in seen_ids:
+                            continue  # Already seen
+                        seen_ids.add(env.envelope_id)
 
-                    if _matches_filter(env):
-                        print(f"📬 New message: {env.name or env.envelope_id[:12]}")
-                        print(f"   From: {env.sender}")
+                        if _matches_filter(env):
+                            print(f"📬 New message: {env.name or env.envelope_id[:12]}")
+                            print(f"   From: {env.sender}")
 
-                        if auto_load:
-                            obj = unpack(env, strict=self.strict, policy=self.policy)
-                            return env, obj
-                        return env
+                            if auto_load:
+                                obj = unpack(
+                                    env,
+                                    strict=self.strict,
+                                    policy=self.policy,
+                                    backend=self._backend,
+                                )
+                                return env, obj
+                            return env
 
             time.sleep(poll_interval)
 
@@ -3707,7 +3724,12 @@ class BeaverContext:
                 if _matches_target_fast(env):
                     print(f"📬 Found existing request: {env.name}")
                     print(f"   From: {env.sender}")
-                    obj = unpack(env, strict=self.strict, policy=TRUSTED_POLICY)
+                    obj = unpack(
+                        env,
+                        strict=self.strict,
+                        policy=TRUSTED_POLICY,
+                        backend=self._backend,
+                    )
                     _mark_processed(env)
                     return obj
 
@@ -3716,7 +3738,12 @@ class BeaverContext:
             for inbox_path in candidate_inboxes:
                 for env in list_inbox(inbox_path, backend=self._backend):
                     if env.name and env.name.startswith("request_") and not _is_processed(env):
-                        obj = unpack(env, strict=self.strict, policy=TRUSTED_POLICY)
+                        obj = unpack(
+                            env,
+                            strict=self.strict,
+                            policy=TRUSTED_POLICY,
+                            backend=self._backend,
+                        )
                         if _matches_target_deep(obj, env):
                             print(f"📬 Found existing request: {env.name}")
                             print(f"   From: {env.sender}")
@@ -3748,7 +3775,12 @@ class BeaverContext:
                     if _matches_target_fast(env):
                         print(f"📬 Request received: {env.name}")
                         print(f"   From: {env.sender}")
-                        obj = unpack(env, strict=self.strict, policy=TRUSTED_POLICY)
+                        obj = unpack(
+                            env,
+                            strict=self.strict,
+                            policy=TRUSTED_POLICY,
+                            backend=self._backend,
+                        )
                         _mark_processed(env)
                         return obj
 
@@ -3759,7 +3791,12 @@ class BeaverContext:
                         and env.name.startswith("request_")
                         and not _is_processed(env)
                     ):
-                        obj = unpack(env, strict=self.strict, policy=TRUSTED_POLICY)
+                        obj = unpack(
+                            env,
+                            strict=self.strict,
+                            policy=TRUSTED_POLICY,
+                            backend=self._backend,
+                        )
                         if _matches_target_deep(obj, env):
                             print(f"📬 Request received: {env.name}")
                             print(f"   From: {env.sender}")
@@ -3818,7 +3855,7 @@ class BeaverContext:
             print(f"   From: {env.sender}")
 
             # Load the response
-            obj = unpack(env, strict=self.strict, policy=self.policy)
+            obj = unpack(env, strict=self.strict, policy=self.policy, backend=self._backend)
 
             # Update the twin's private value
             if hasattr(obj, "private"):

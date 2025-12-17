@@ -85,6 +85,14 @@ class BeaverEnvelope:
         ):
             backend = context._backend
 
+        # Also try to get backend from session's context (for inbox-loaded envelopes)
+        if backend is None and hasattr(self, "_session") and self._session is not None:
+            session = self._session
+            if hasattr(session, "_context") and session._context is not None:
+                ctx = session._context
+                if hasattr(ctx, "_backend") and ctx._backend:
+                    backend = ctx._backend
+
         obj = unpack(
             self,
             strict=strict,

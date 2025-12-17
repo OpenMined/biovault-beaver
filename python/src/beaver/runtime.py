@@ -1579,7 +1579,9 @@ def _resolve_trusted_loader(
                 display_filename = _cross_platform_filename(data_path)
                 if not file_path.exists():
                     if not waited:
-                        print(f"⏳ Waiting for artifact file to sync: {display_filename}")
+                        print(
+                            f"⏳ Waiting for artifact file to sync: {display_filename} (at {file_path})"
+                        )
                         waited = True
                     if now - last_print >= spinner_interval:
                         spin_idx = (spin_idx + 1) % len(spinner_chars)
@@ -1595,7 +1597,8 @@ def _resolve_trusted_loader(
                     stable_since = now
                     if not waited:
                         print(
-                            f"⏳ Waiting for artifact file to sync: {display_filename} ({current_size:,} bytes)"
+                            f"⏳ Waiting for artifact file to sync: {display_filename} "
+                            f"(at {file_path}, {current_size:,} bytes)"
                         )
                         waited = True
                     if now - last_print >= spinner_interval:

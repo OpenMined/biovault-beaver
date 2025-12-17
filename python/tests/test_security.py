@@ -473,6 +473,31 @@ def test_trusted_loader_relative_path_resolves_against_envelope_path(tmp_path):
     assert str(resolved) == str(artifact)
 
 
+def test_twin_load_uses_source_path_for_relative_artifacts(tmp_path):
+    """Twin.load should resolve relative TrustedLoader paths using Twin._source_path."""
+    from beaver.twin import Twin
+
+    session_dir = tmp_path / "sessions" / "abc123"
+    data_dir = session_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    artifact = data_dir / "artifact.bin"
+    artifact.write_bytes(b"ok")
+
+    env_path = data_dir / "env.beaver"
+    env_path.write_text("{}")
+
+    loader = {
+        "_trusted_loader": True,
+        "path": "data/artifact.bin",
+        "deserializer_src": "def load(p):\n    return p\n",
+        "name": "test.loader",
+    }
+    twin = Twin(public=loader, private=None, owner="me")
+    twin._source_path = str(env_path)
+    resolved = twin.load(which="public", auto_accept=True, trust_loader=False)
+    assert str(resolved) == str(artifact)
+
+
 def test_sender_verification_rejects_spoofed_sender(tmp_path):
     """read_envelope_verified should reject envelopes with spoofed sender."""
     try:

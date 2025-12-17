@@ -1507,6 +1507,7 @@ class RemoteVarPointer:
                                     reply_to=record.get("reply_to"),
                                     payload=payload,
                                 )
+                                env._path = str(data_path)  # type: ignore[attr-defined]
                             else:
                                 env = read_envelope(data_path)
                         else:
@@ -1747,6 +1748,7 @@ class RemoteVarPointer:
                                         reply_to=record.get("reply_to"),
                                         payload=payload,
                                     )
+                                    env._path = str(data_path)  # type: ignore[attr-defined]
                                 else:
                                     env = read_envelope(data_path)
                             else:

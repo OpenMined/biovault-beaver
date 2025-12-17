@@ -650,8 +650,13 @@ class Twin(LiveMixin, RemoteData):
         from .runtime import _resolve_trusted_loader
 
         backend = getattr(self, "_backend", None)
+        envelope_path = getattr(self, "_source_path", None)
         return _resolve_trusted_loader(
-            loader_dict, auto_accept=auto_accept, backend=backend, trust_loader=trust_loader
+            loader_dict,
+            auto_accept=auto_accept,
+            backend=backend,
+            trust_loader=trust_loader,
+            envelope_path=envelope_path,
         )
 
     def load(

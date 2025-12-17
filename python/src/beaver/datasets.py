@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import builtins
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Dict, Optional
 from uuid import uuid4
 
 import yaml

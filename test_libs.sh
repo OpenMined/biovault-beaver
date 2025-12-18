@@ -10,5 +10,30 @@ PY_BIN="$VENV_PATH/bin/python"
 uv venv "$VENV_PATH"
 uv pip install --python "$PY_BIN" -e "$SCRIPT_DIR/python[dev,lib-support]"
 
+# Force install pyfory x86_64 wheel on macOS Intel (universal wheel doesn't work)
+# Also need numpy<2 because torch 2.2.2 (last Intel wheel) doesn't support numpy 2.x
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
+    echo "=== macOS Intel detected ==="
+
+    echo "Downgrading numpy<2 for torch 2.2.2 compatibility..."
+    uv pip install --python "$PY_BIN" "numpy<2"
+
+    echo "Before pyfory fix:"
+    uv pip show --python "$PY_BIN" pyfory || echo "pyfory not installed"
+    "$PY_BIN" -c "import pyfory; print('pyfory import OK')" 2>&1 || echo "pyfory import FAILED"
+
+    echo "Uninstalling pyfory..."
+    uv pip uninstall --python "$PY_BIN" pyfory || true
+
+    echo "Installing pyfory x86_64 wheel..."
+    uv pip install --python "$PY_BIN" \
+        https://files.pythonhosted.org/packages/35/c5/b2de2a2dc0d2b74002924cdd46a6e6d3bccc5380181ca0dc850855608bfe/pyfory-0.13.2-cp312-cp312-macosx_10_13_x86_64.whl
+
+    echo "After pyfory fix:"
+    uv pip show --python "$PY_BIN" pyfory
+    "$PY_BIN" -c "import pyfory; print('pyfory import OK')" || echo "pyfory import STILL FAILED"
+    echo "=== End pyfory fix ==="
+fi
+
 cd "$SCRIPT_DIR/python"
 "$PY_BIN" -m pytest tests/test_lib_support.py -v

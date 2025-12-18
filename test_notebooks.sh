@@ -8,7 +8,7 @@ INTERACTIVE=0
 RUN_ALL=0
 CONFIG_PATH=""
 
-REQUIREMENTS=(papermill jupyter nbconvert ipykernel scanpy anndata matplotlib scikit-misc pyarrow torch torchvision safetensors)
+REQUIREMENTS=(papermill jupyter nbconvert ipykernel anndata matplotlib scikit-misc pyarrow torch torchvision safetensors)
 
 # Security test mode - for 00-malicious notebooks
 SECURITY_TEST=0
@@ -122,7 +122,18 @@ RUN_COUNT=${#ROLES[@]}
 
 echo "Setting up environment..."
 uv venv --quiet --allow-existing "$ENV_DIR"
-uv pip install --quiet -p "$ENV_DIR/bin/python" "${REQUIREMENTS[@]}"
+
+# On macOS Intel, install deps one-by-one for debugging
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
+    echo "macOS Intel: Installing dependencies one-by-one..."
+    for pkg in "${REQUIREMENTS[@]}"; do
+        echo "  Installing $pkg..."
+        uv pip install -p "$ENV_DIR/bin/python" "$pkg"
+    done
+else
+    uv pip install --quiet -p "$ENV_DIR/bin/python" "${REQUIREMENTS[@]}"
+fi
+
 uv pip install --quiet -p "$ENV_DIR/bin/python" -e "$ROOT_DIR/python"
 
 # Force install pyfory x86_64 wheel on macOS Intel (universal wheel doesn't work)

@@ -304,7 +304,8 @@ if [[ "$RUN_ALL" == "1" ]]; then
     # Force install pyfory x86_64 wheel on macOS Intel (universal wheel doesn't work)
     if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
         info "Detected macOS Intel - force installing pyfory x86_64 wheel..."
-        uv pip install --quiet -p "$ENV_DIR/bin/python" --force-reinstall \
+        uv pip uninstall --quiet -p "$ENV_DIR/bin/python" pyfory || true
+        uv pip install --quiet -p "$ENV_DIR/bin/python" \
             https://files.pythonhosted.org/packages/35/c5/b2de2a2dc0d2b74002924cdd46a6e6d3bccc5380181ca0dc850855608bfe/pyfory-0.13.2-cp312-cp312-macosx_10_13_x86_64.whl
     fi
 
@@ -381,7 +382,8 @@ uv pip install --quiet -p "$ENV_DIR/bin/python" -e "$ROOT_DIR/python[lib-support
 # Force install pyfory x86_64 wheel on macOS Intel (universal wheel doesn't work)
 if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
     info "Detected macOS Intel - force installing pyfory x86_64 wheel..."
-    uv pip install --quiet -p "$ENV_DIR/bin/python" --force-reinstall \
+    uv pip uninstall --quiet -p "$ENV_DIR/bin/python" pyfory || true
+    uv pip install --quiet -p "$ENV_DIR/bin/python" \
         https://files.pythonhosted.org/packages/35/c5/b2de2a2dc0d2b74002924cdd46a6e6d3bccc5380181ca0dc850855608bfe/pyfory-0.13.2-cp312-cp312-macosx_10_13_x86_64.whl
 fi
 

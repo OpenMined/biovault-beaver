@@ -11,8 +11,13 @@ uv venv "$VENV_PATH"
 uv pip install --python "$PY_BIN" -e "$SCRIPT_DIR/python[dev,lib-support]"
 
 # Force install pyfory x86_64 wheel on macOS Intel (universal wheel doesn't work)
+# Also need numpy<2 because torch 2.2.2 (last Intel wheel) doesn't support numpy 2.x
 if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
     echo "=== macOS Intel detected ==="
+
+    echo "Downgrading numpy<2 for torch 2.2.2 compatibility..."
+    uv pip install --python "$PY_BIN" "numpy<2"
+
     echo "Before pyfory fix:"
     uv pip show --python "$PY_BIN" pyfory || echo "pyfory not installed"
     "$PY_BIN" -c "import pyfory; print('pyfory import OK')" 2>&1 || echo "pyfory import FAILED"

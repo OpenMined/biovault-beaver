@@ -3,7 +3,7 @@ name = "biovault-beaver"
 dynamic = ["version"]
 description = "A library for data visitation and eager execution of remote bioinformatics workflows."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9,<3.15"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Madhava Jay <madhava@openmined.org>" }]
 classifiers = [
@@ -11,7 +11,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -21,11 +20,11 @@ classifiers = [
 ]
 dependencies = [
     "pyyaml>=6.0",
-    "pyfory",
-    "numpy",
-    "RestrictedPython",
+    "pyfory==0.13.2",
+    "numpy>=1.20.0",
+    "RestrictedPython>=8.0",
     "zstandard>=0.20.0",
-    "syftbox-sdk",
+    "syftbox-sdk>=0.1.10",
 ]
 
 [project.scripts]
@@ -64,7 +63,7 @@ path = "src/beaver/__init__.py"
 
 [tool.ruff]
 line-length = 100
-target-version = "py38"
+target-version = "py39"
 
 [tool.ruff.lint]
 select = [
@@ -83,9 +82,8 @@ ignore = [
     "E501",  # line too long (handled by formatter)
     "E741",  # ambiguous variable names (I/D are standard in bioinformatics)
     "E743",  # ambiguous function names (I/D are standard in bioinformatics)
-    "UP006", # Use dict instead of Dict (requires Python 3.9+, we support 3.8)
-    "UP007", # Use X | Y instead of Union (requires Python 3.10+, we support 3.8)
-    "UP045", # Use X | None instead of Optional (requires Python 3.10+, we support 3.8)
+    "UP007", # Use X | Y instead of Union (requires Python 3.10+, we support 3.9)
+    "UP045", # Use X | None instead of Optional (requires Python 3.10+, we support 3.9)
 ]
 
 [tool.ruff.lint.per-file-ignores]

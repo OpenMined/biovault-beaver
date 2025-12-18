@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 from uuid import UUID, uuid4
 
 
@@ -19,10 +19,10 @@ class BeaverEnvelope:
     sender: str = "unknown"
     created_at: str = field(default_factory=_iso_now)
     name: Optional[str] = None
-    inputs: List[str] = field(default_factory=list)
-    outputs: List[str] = field(default_factory=list)
-    requirements: List[str] = field(default_factory=list)
-    manifest: Dict[str, Any] = field(default_factory=dict)
+    inputs: list[str] = field(default_factory=list)
+    outputs: list[str] = field(default_factory=list)
+    requirements: list[str] = field(default_factory=list)
+    manifest: dict[str, Any] = field(default_factory=dict)
     payload: bytes = b""
     reply_to: Optional[str] = None
 
@@ -51,6 +51,7 @@ class BeaverEnvelope:
         context=None,
         auto_accept: bool = False,
         backend=None,
+        trust_loader: bool | None = None,
     ) -> Any:
         """
         Load the envelope payload and inject into caller's globals.
@@ -65,6 +66,7 @@ class BeaverEnvelope:
             context: BeaverContext for live subscription (auto-detected if None)
             auto_accept: If True, automatically accept trusted loaders without prompting
             backend: Optional SyftBoxBackend for reading encrypted artifact files
+            trust_loader: If True, run loader in trusted mode. If None, prompt on failure.
         """
         import inspect
 
@@ -83,7 +85,22 @@ class BeaverEnvelope:
         ):
             backend = context._backend
 
-        obj = unpack(self, strict=strict, policy=policy, auto_accept=auto_accept, backend=backend)
+        # Also try to get backend from session's context (for inbox-loaded envelopes)
+        if backend is None and hasattr(self, "_session") and self._session is not None:
+            session = self._session
+            if hasattr(session, "_context") and session._context is not None:
+                ctx = session._context
+                if hasattr(ctx, "_backend") and ctx._backend:
+                    backend = ctx._backend
+
+        obj = unpack(
+            self,
+            strict=strict,
+            policy=policy,
+            auto_accept=auto_accept,
+            backend=backend,
+            trust_loader=trust_loader,
+        )
 
         # Attach session reference if envelope was loaded from a session context
         if hasattr(self, "_session") and self._session is not None:

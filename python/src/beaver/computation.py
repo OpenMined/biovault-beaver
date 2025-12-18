@@ -703,9 +703,15 @@ class ComputationResult:
             "rejected_at": _iso_now(),
         }
 
-        # Send rejection back - use session folder if available
+        # Send rejection back - use session data folder if available
         if self.session is not None:
+            from pathlib import Path
+
             from .runtime import pack, write_envelope
+
+            # Use data/ subdirectory for all beaver files
+            data_dir = Path(self.session.local_folder) / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
 
             env = pack(
                 rejection,
@@ -713,9 +719,8 @@ class ComputationResult:
                 name=f"rejection_{self.var_name}",
                 reply_to=self.comp_id,
             )
-            dest_dir = self.session.local_folder
-            result = write_envelope(env, out_dir=dest_dir)
-            print(f"✓ Rejection sent to session folder: {dest_dir}")
+            result = write_envelope(env, out_dir=data_dir)
+            print(f"✓ Rejection sent to session data folder: {data_dir}")
         else:
             result = self.context.send(
                 rejection,
@@ -950,10 +955,14 @@ class ComputationResult:
         # Send the result Twin back as a reply
         # Use session folder if available, otherwise fall back to user inbox
         if self.session is not None:
-            # Write to our session folder (peer can read it via sync)
+            # Write to our session data folder (peer can read it via sync)
+            from pathlib import Path
+
             from .runtime import pack, write_envelope
 
-            dest_dir = self.session.local_folder
+            # Use data/ subdirectory for all beaver files
+            data_dir = Path(self.session.local_folder) / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
 
             # Determine backend and recipients for encryption
             # In SyftBox, data is encrypted FOR THE RECIPIENT (peer) only
@@ -973,7 +982,7 @@ class ComputationResult:
                 sender=self.context.user,
                 name=self.var_name,
                 reply_to=self.comp_id,
-                artifact_dir=dest_dir,
+                artifact_dir=data_dir,
                 backend=backend,
                 recipients=recipients,
                 preserve_private=preserve_private,
@@ -998,8 +1007,7 @@ class ComputationResult:
                     "payload_b64": base64.b64encode(env.payload).decode("ascii"),
                 }
                 content = json.dumps(record, indent=2).encode("utf-8")
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                data_path = dest_dir / env.filename()
+                data_path = data_dir / env.filename()
                 backend.storage.write_with_shadow(
                     str(data_path),
                     content,
@@ -1008,8 +1016,8 @@ class ComputationResult:
                 )
                 result = data_path
             else:
-                result = write_envelope(env, out_dir=dest_dir)
-            print(f"✓ Result sent to session folder: {dest_dir}")
+                result = write_envelope(env, out_dir=data_dir)
+            print(f"✓ Result sent to session data folder: {data_dir}")
         else:
             # Fallback: send to user's inbox (legacy path)
             result = self.context.send(
@@ -1275,7 +1283,7 @@ class ComputationRequest:
                 if twin._is_trusted_loader(raw_private):
                     # Auto-load since owner is running the computation (implicit consent)
                     print(f"🔓 Auto-loading private data for '{twin.name}'...")
-                    loaded = twin.load(which="private", auto_accept=True)
+                    loaded = twin.load(which="private", auto_accept=False)
                     if loaded is None:
                         return None
                     return unwrap_for_computation(loaded)
@@ -1670,7 +1678,7 @@ class ComputationRequest:
                 if twin._is_trusted_loader(raw_public):
                     # Auto-load since this is for mock testing
                     print(f"🌍 Auto-loading public data for '{twin.name}'...")
-                    loaded = twin.load(which="public", auto_accept=True)
+                    loaded = twin.load(which="public", auto_accept=False)
                     if loaded is None:
                         return None
                     return unwrap_for_computation(loaded)

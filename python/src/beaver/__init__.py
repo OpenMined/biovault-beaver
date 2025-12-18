@@ -1,6 +1,5 @@
 """Lightweight notebook-to-notebook ferry for Python objects using Fory."""
 
-from . import sample_data
 from .computation import (
     ComputationRequest,
     ComputationResult,
@@ -20,7 +19,7 @@ from .policy import (
     BeaverPolicy,
 )
 from .remote_data import get_current_owner
-from .remote_vars import RemoteVar, RemoteVarRegistry, RemoteVarView
+from .remote_vars import NotReady, RemoteVar, RemoteVarRegistry, RemoteVarView
 from .runtime import (
     BeaverContext,
     InboxView,
@@ -49,6 +48,20 @@ from .twin_result import TwinComputationResult
 # Debug flag for beaver output
 # Also controls SyftBox SDK debug output when using SyftBoxBackend
 _debug_enabled = False
+
+
+def __getattr__(name: str):
+    """
+    Lazy imports for optional/heavier modules.
+
+    This keeps `import beaver` lightweight so basic serialization can work in minimal
+    environments and tests can control optional deps.
+    """
+    if name == "sample_data":
+        from . import sample_data as _sample_data  # noqa: PLC0415
+
+        return _sample_data
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 
 def set_debug(enabled: bool = True) -> None:
@@ -157,19 +170,24 @@ def dev() -> None:
     print("\nRestart kernel to use new versions.")
 
 
-# Enable matplotlib inline mode by default in Jupyter/IPython
+# Enable matplotlib inline mode by default in Jupyter/IPython.
+# Avoid importing IPython in non-interactive scripts (it can trigger heavy imports).
 try:
-    from IPython import get_ipython
+    import sys
 
-    ip = get_ipython()
-    if ip is not None:
-        ip.run_line_magic("matplotlib", "inline")
-except (ImportError, AttributeError):
+    if "IPython" in sys.modules:
+        from IPython import get_ipython  # type: ignore
+
+        ip = get_ipython()
+        if ip is not None:
+            ip.run_line_magic("matplotlib", "inline")
+except Exception:
     pass
 
 # SyftBox integration (optional - requires syftbox-sdk)
 try:
     from .syftbox_backend import (
+        SenderVerificationError,
         SyftBoxBackend,
         import_peer_bundle,
         provision_identity,
@@ -178,6 +196,7 @@ try:
     _SYFTBOX_AVAILABLE = True
 except ImportError:
     _SYFTBOX_AVAILABLE = False
+    SenderVerificationError = None  # type: ignore
     SyftBoxBackend = None  # type: ignore
     import_peer_bundle = None  # type: ignore
     provision_identity = None  # type: ignore
@@ -296,8 +315,9 @@ class _FnDecorator:
 fn = _FnDecorator()
 
 
-__version__ = "0.1.28"
+__version__ = "0.1.42"
 __all__ = [
+    "sample_data",
     "active_session",
     "BeaverContext",
     "BeaverEnvelope",
@@ -316,6 +336,7 @@ __all__ = [
     "RemoteVar",
     "RemoteVarRegistry",
     "RemoteVarView",
+    "SenderVerificationError",
     "Session",
     "SessionRequest",
     "SessionRequestsView",

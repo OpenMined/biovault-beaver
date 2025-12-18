@@ -11,13 +11,25 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 import beaver
 
 if TYPE_CHECKING:
     from .envelope import BeaverEnvelope
     from .session import SessionRequest
+
+
+class SenderVerificationError(Exception):
+    """Raised when envelope sender doesn't match cryptographically verified sender."""
+
+    def __init__(self, claimed_sender: str, verified_sender: str):
+        self.claimed_sender = claimed_sender
+        self.verified_sender = verified_sender
+        super().__init__(
+            f"Sender verification failed: envelope claims '{claimed_sender}' "
+            f"but crypto verified '{verified_sender}'"
+        )
 
 
 def _iso_now() -> str:
@@ -151,7 +163,7 @@ class SyftBoxBackend:
     def write_envelope(
         self,
         envelope: BeaverEnvelope,
-        recipients: List[str],
+        recipients: list[str],
         filename: Optional[str] = None,
     ) -> Path:
         """
@@ -209,13 +221,69 @@ class SyftBoxBackend:
             # Plaintext read
             data = bytes(self.storage.read_bytes(str(path)))
 
-        return _deserialize_envelope(data)
+        env = _deserialize_envelope(data)
+        # Non-serialized hint used to resolve TrustedLoader relative artifact paths.
+        env._path = str(path)  # type: ignore[attr-defined]
+        return env
+
+    def read_envelope_verified(
+        self, path: Path | str, verify: bool = True
+    ) -> tuple[BeaverEnvelope, str, str]:
+        """
+        Read envelope and verify sender identity cryptographically.
+
+        Uses syftbox-sdk's read_with_shadow_metadata to get the verified sender
+        from the encrypted envelope's signature, then compares it to the
+        claimed sender in the envelope.
+
+        Args:
+            path: Path to .beaver file (in datasites/)
+            verify: If True, raise SenderVerificationError on mismatch.
+                   If False, just return the verified sender for inspection.
+
+        Returns:
+            Tuple of (envelope, verified_sender, fingerprint)
+            - envelope: Decrypted BeaverEnvelope
+            - verified_sender: Cryptographically verified sender identity
+            - fingerprint: Sender's identity key fingerprint (SHA256 hex)
+
+        Raises:
+            SenderVerificationError: If verify=True and claimed sender doesn't
+                                    match verified sender
+        """
+        path = Path(path)
+
+        if self.uses_crypto:
+            # Read with metadata to get verified sender
+            result = self.storage.read_with_shadow_metadata(str(path))
+            data = bytes(result.data)
+            verified_sender = result.sender
+            fingerprint = result.fingerprint
+        else:
+            # Plaintext read - no crypto verification possible
+            data = bytes(self.storage.read_bytes(str(path)))
+            verified_sender = "(plaintext)"
+            fingerprint = "(none)"
+
+        envelope = _deserialize_envelope(data)
+        # Non-serialized hint used to resolve TrustedLoader relative artifact paths.
+        envelope._path = str(path)  # type: ignore[attr-defined]
+
+        # Verify sender if crypto is enabled and file was encrypted
+        if (
+            verify
+            and verified_sender not in ("(plaintext)", "(none)")
+            and envelope.sender != verified_sender
+        ):
+            raise SenderVerificationError(envelope.sender, verified_sender)
+
+        return envelope, verified_sender, fingerprint
 
     def write_bytes(
         self,
         relative_path: str,
         data: bytes,
-        recipients: Optional[List[str]] = None,
+        recipients: Optional[list[str]] = None,
     ) -> Path:
         """
         Write bytes to user's shared folder.
@@ -261,7 +329,7 @@ class SyftBoxBackend:
         else:
             return bytes(self.storage.read_bytes(str(path)))
 
-    def list_envelopes(self, peer_email: Optional[str] = None) -> List[Path]:
+    def list_envelopes(self, peer_email: Optional[str] = None) -> list[Path]:
         """
         List .beaver files in a shared folder.
 
@@ -279,7 +347,7 @@ class SyftBoxBackend:
 
         return sorted(peer_shared.glob("*.beaver"))
 
-    def list_peer_envelopes(self, peer_email: str) -> List[Path]:
+    def list_peer_envelopes(self, peer_email: str) -> list[Path]:
         """
         List .beaver files in peer's shared folder.
 
@@ -418,7 +486,7 @@ class SyftBoxBackend:
 
         return request_file
 
-    def list_session_requests(self) -> List[SessionRequest]:
+    def list_session_requests(self) -> list[SessionRequest]:
         """
         List pending session requests in our RPC folder.
 

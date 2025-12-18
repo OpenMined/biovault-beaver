@@ -123,8 +123,10 @@ def _sync_twin_instances(twin_id: str, owner: str, source_twin):
         print(
             f"🔄 Synced {len(updated_vars)} variable(s) to canonical Twin: {', '.join(updated_vars)}"
         )
+        has_public = canonical.public is not None
+        has_private = canonical.private is not None
         print(
-            f"   Canonical has: public={'✓' if canonical.public else '✗'}, private={'✓' if canonical.private else '✗'}"
+            f"   Canonical has: public={'✓' if has_public else '✗'}, private={'✓' if has_private else '✗'}"
         )
 
     # Return the canonical Twin so caller can use it
@@ -297,12 +299,12 @@ class Twin(LiveMixin, RemoteData):
             # Merge public if existing lacks it
             elif existing_pub is None and self_pub is not None:
                 object.__setattr__(existing, "public", self_pub)
-                if hasattr(self, "public_stdout"):
-                    existing.public_stdout = getattr(self, "public_stdout", None)
-                if hasattr(self, "public_stderr"):
-                    existing.public_stderr = getattr(self, "public_stderr", None)
-                if hasattr(self, "public_figures"):
-                    existing.public_figures = getattr(self, "public_figures", None)
+                # Only overwrite captured outputs if new value is not None
+                # (preserve existing values during _prepare_for_sending merge)
+                for attr in ("public_stdout", "public_stderr", "public_figures"):
+                    new_val = getattr(self, attr, None)
+                    if new_val is not None:
+                        setattr(existing, attr, new_val)
 
             # Merge private if existing lacks it or only has placeholder request
             existing_priv = object.__getattribute__(existing, "private")
@@ -331,12 +333,12 @@ class Twin(LiveMixin, RemoteData):
                 existing_priv is None or is_placeholder or is_idempotent or is_stale_priv
             ) and self_priv is not None:
                 object.__setattr__(existing, "private", self_priv)
-                if hasattr(self, "private_stdout"):
-                    existing.private_stdout = getattr(self, "private_stdout", None)
-                if hasattr(self, "private_stderr"):
-                    existing.private_stderr = getattr(self, "private_stderr", None)
-                if hasattr(self, "private_figures"):
-                    existing.private_figures = getattr(self, "private_figures", None)
+                # Only overwrite captured outputs if new value is not None
+                # (preserve existing values during _prepare_for_sending merge)
+                for attr in ("private_stdout", "private_stderr", "private_figures"):
+                    new_val = getattr(self, attr, None)
+                    if new_val is not None:
+                        setattr(existing, attr, new_val)
 
             # Keep registry pointing at the original instance
             _TWIN_REGISTRY[key] = existing
@@ -344,7 +346,12 @@ class Twin(LiveMixin, RemoteData):
             _TWIN_REGISTRY[key] = self
 
     def __getattribute__(self, name: str):
-        """Intercept access to public/private to auto-resolve TrustedLoader dicts."""
+        """Intercept access to public/private to handle special cases.
+
+        SECURITY: This hook does NOT auto-execute TrustedLoader code.
+        Users must explicitly call .load() to execute loader code.
+        This prevents unexpected code execution from simple attribute access.
+        """
         # Get the raw value first (avoid infinite recursion)
         value = object.__getattribute__(self, name)
 
@@ -358,41 +365,15 @@ class Twin(LiveMixin, RemoteData):
                 pass
 
             # Handle inline parquet blobs (e.g., decrypted trusted loader payloads)
+            # This is safe - just deserializing data bytes, no code execution
             inline = Twin._load_inline_parquet(value)
             if inline is not None:
                 object.__setattr__(self, name, inline)
                 return inline
 
-            # Check if it's a TrustedLoader dict
-            if isinstance(value, dict) and value.get("_trusted_loader") is True:
-                # Check if the data file exists - if not, return the dict as-is
-                # This allows serialization to work without triggering loads
-                from pathlib import Path
-
-                data_path = value.get("path")
-                if data_path and not Path(data_path).exists():
-                    # File doesn't exist - return raw dict for serialization passthrough
-                    return value
-
-                # Set loading flag to prevent recursion
-                object.__setattr__(self, "_loading", True)
-                try:
-                    # Prompt user to load
-                    twin_name = (
-                        object.__getattribute__(self, "name")
-                        or object.__getattribute__(self, "twin_id")[:8]
-                    )
-                    print(f"\n⚠️  Twin '{twin_name}' .{name} has unloaded data.")
-                    print("   Call .load() to load it, or approve now:")
-
-                    # Use the load method to resolve
-                    load_method = object.__getattribute__(self, "load")
-                    load_method(which=name)
-
-                    # Return the now-resolved value
-                    return object.__getattribute__(self, name)
-                finally:
-                    object.__setattr__(self, "_loading", False)
+            # SECURITY: TrustedLoader dicts are returned as-is
+            # Users must explicitly call .load() to execute loader code
+            # This prevents unexpected code execution from attribute access
 
         return value
 
@@ -662,143 +643,27 @@ class Twin(LiveMixin, RemoteData):
         first_line = src.strip().split("\n")[0]
         return any(f"def {name}(" in first_line for name in self._BUILTIN_DESERIALIZERS)
 
-    def _resolve_trusted_loader(self, loader_dict: dict, auto_accept: bool = False) -> Any:
+    def _resolve_trusted_loader(
+        self, loader_dict: dict, auto_accept: bool = False, trust_loader: bool | None = None
+    ) -> Any:
         """
-        Resolve a TrustedLoader dict by executing the deserializer.
-
-        Args:
-            loader_dict: Dict with _trusted_loader, path, deserializer_src, and optional meta
-            auto_accept: If True, skip approval prompt
-
-        Returns:
-            The loaded data
+        Resolve a TrustedLoader dict by delegating to runtime sandboxed resolver.
         """
-        name = loader_dict.get("name", "unknown")
-        data_path = loader_dict.get("path")
-        src = loader_dict.get("deserializer_src", "")
-        meta = loader_dict.get("meta")  # Embedded metadata (e.g., pandas kind/name)
+        from .runtime import _resolve_trusted_loader
 
-        if not data_path or not src:
-            raise ValueError("Invalid TrustedLoader: missing path or deserializer_src")
+        backend = getattr(self, "_backend", None)
+        envelope_path = getattr(self, "_source_path", None)
+        return _resolve_trusted_loader(
+            loader_dict,
+            auto_accept=auto_accept,
+            backend=backend,
+            trust_loader=trust_loader,
+            envelope_path=envelope_path,
+        )
 
-        # Auto-accept built-in lib-support deserializers (they're trusted code)
-        if not auto_accept and self._is_builtin_deserializer(src):
-            auto_accept = True
-
-        if not auto_accept:
-            # ANSI color codes
-            yellow = "\033[33m"
-            cyan = "\033[36m"
-            green = "\033[32m"
-            dim = "\033[2m"
-            reset = "\033[0m"
-
-            lines = []
-            lines.append("")
-            lines.append("━" * 70)
-            lines.append(f"{yellow}⚠️  Code Execution Required{reset}")
-            lines.append("━" * 70)
-            lines.append("")
-            lines.append(f"📦 Loading: {cyan}{name}{reset}")
-            lines.append(f"   From: {dim}{data_path}{reset}")
-            lines.append("")
-            lines.append("📋 Code to execute:")
-            lines.append("")
-
-            # Format the code with line numbers
-            for i, line in enumerate(src.strip().splitlines(), 1):
-                lines.append(f"   {dim}{i:2d}{reset} │ {cyan}{line}{reset}")
-
-            lines.append("")
-            lines.append("━" * 70)
-
-            print("\n".join(lines))
-
-            resp = input(f"\n{green}Execute this code? [y/N]:{reset} ").strip().lower()
-            if resp not in ("y", "yes"):
-                print(f"\n{dim}ℹ️  Load cancelled. Data remains unloaded.{reset}")
-                return None
-
-        # Build scope with common imports
-        scope: dict = {}
-        try:
-            import anndata as ad
-
-            scope["ad"] = ad
-            scope["anndata"] = ad
-        except ImportError:
-            pass
-        try:
-            import pandas as pd
-
-            scope["pd"] = pd
-            scope["pandas"] = pd
-        except ImportError:
-            pass
-        try:
-            import numpy as np
-
-            scope["np"] = np
-            scope["numpy"] = np
-        except ImportError:
-            pass
-
-        # Inject SyftBox-aware file reader for encrypted file support
-        # This allows deserializers to read files that may be encrypted
-        def _beaver_read_bytes(path):
-            """Read file bytes, auto-decrypting if needed via SyftBox."""
-            from pathlib import Path as _Path
-
-            path = _Path(path)
-            # Try to get backend from beaver context
-            try:
-                from .runtime import _get_current_context
-
-                ctx = _get_current_context()
-                if ctx and hasattr(ctx, "_backend") and ctx._backend:
-                    backend = ctx._backend
-                    if hasattr(backend, "storage") and hasattr(backend.storage, "read_with_shadow"):
-                        return bytes(backend.storage.read_with_shadow(str(path)))
-            except Exception:
-                pass
-            # Fallback to direct read
-            return path.read_bytes()
-
-        def _beaver_read_text(path, encoding="utf-8"):
-            """Read file text, auto-decrypting if needed via SyftBox."""
-            return _beaver_read_bytes(path).decode(encoding)
-
-        scope["_beaver_read_bytes"] = _beaver_read_bytes
-        scope["_beaver_read_text"] = _beaver_read_text
-
-        # Inject metadata if available (eliminates need for .meta.json files)
-        if meta is not None:
-            scope["_beaver_meta"] = meta
-
-        # Execute the deserializer source to get the load function
-        exec(src, scope, scope)
-
-        # Find the load function (exclude imported modules)
-        excluded = {
-            scope.get("ad"),
-            scope.get("pd"),
-            scope.get("np"),
-            scope.get("anndata"),
-            scope.get("pandas"),
-            scope.get("numpy"),
-        }
-        load_fn = next((v for v in scope.values() if callable(v) and v not in excluded), None)
-
-        if load_fn is None:
-            raise RuntimeError("No deserializer function found in loader source")
-
-        # Call the load function
-        print("   ✓ Loading data...")
-        result = load_fn(data_path)
-        print(f"   ✓ Loaded: {type(result).__name__}")
-        return result
-
-    def load(self, which: str = "auto", auto_accept: bool = False) -> Any:
+    def load(
+        self, which: str = "auto", auto_accept: bool = False, trust_loader: bool | None = None
+    ) -> Any:
         """
         Load data from TrustedLoader descriptors.
 
@@ -808,6 +673,9 @@ class Twin(LiveMixin, RemoteData):
         Args:
             which: "auto" (prefer private), "public", "private", or "both"
             auto_accept: If True, skip approval prompts
+            trust_loader: If True, run loader in trusted mode (full builtins).
+                         If False, use RestrictedPython only (may fail).
+                         If None (default), try RestrictedPython first and prompt on failure.
 
         Returns:
             The loaded value (prefers private if both loaded)
@@ -815,6 +683,8 @@ class Twin(LiveMixin, RemoteData):
         Example:
             >>> dataset = bv.datasets["owner"]["name"]
             >>> adata = dataset.sc_rnaseq.load()  # prompts, loads, returns AnnData
+            >>> # Or explicitly trust for automation:
+            >>> adata = dataset.sc_rnaseq.load(trust_loader=True)
         """
         loaded_private = False
         loaded_public = False
@@ -830,7 +700,9 @@ class Twin(LiveMixin, RemoteData):
         # If auto and private is a loader, load it
         if load_private:
             print(f"🔒 Loading PRIVATE data for Twin '{self.name or self.twin_id[:8]}'")
-            resolved = self._resolve_trusted_loader(raw_private, auto_accept=auto_accept)
+            resolved = self._resolve_trusted_loader(
+                raw_private, auto_accept=auto_accept, trust_loader=trust_loader
+            )
             if resolved is not None:
                 object.__setattr__(self, "private", resolved)
                 loaded_private = True
@@ -838,7 +710,9 @@ class Twin(LiveMixin, RemoteData):
         # If auto and public is a loader (and we didn't load private, or explicitly requested)
         if load_public and (not loaded_private or which in ("public", "both")):
             print(f"🌍 Loading PUBLIC data for Twin '{self.name or self.twin_id[:8]}'")
-            resolved = self._resolve_trusted_loader(raw_public, auto_accept=auto_accept)
+            resolved = self._resolve_trusted_loader(
+                raw_public, auto_accept=auto_accept, trust_loader=trust_loader
+            )
             if resolved is not None:
                 object.__setattr__(self, "public", resolved)
                 loaded_public = True

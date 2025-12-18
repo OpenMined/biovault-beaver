@@ -7,7 +7,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 import pytest
 
@@ -15,11 +15,11 @@ from beaver.lib_support import register_builtin_loader
 from beaver.runtime import TrustedLoader
 
 
-def summarize(obj: Any) -> Dict[str, Any]:
+def summarize(obj: Any) -> dict[str, Any]:
     import hashlib
     from io import BytesIO
 
-    summary: Dict[str, Any] = {"type": f"{type(obj).__module__}.{type(obj).__name__}"}
+    summary: dict[str, Any] = {"type": f"{type(obj).__module__}.{type(obj).__name__}"}
 
     try:
         import numpy as np
@@ -153,7 +153,7 @@ def _clean_source(fn: Callable[..., Any]) -> str:
 
 def _run_deserializer_in_subprocess(
     src: str, data_path: Path, meta: Optional[dict] = None
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     script_lines = [
         "import json",
         "from pathlib import Path",
@@ -181,7 +181,7 @@ def _run_deserializer_in_subprocess(
         "        pass",
         "",
         # Inject metadata if provided (mirrors runtime injection)
-        f"scope['_beaver_meta'] = {json.dumps(meta) if meta is not None else 'None'}",
+        f"scope['beaver_meta'] = {json.dumps(meta) if meta is not None else 'None'}",
         "",
         SUMMARY_SOURCE,
         f"exec({src!r}, scope, scope)",
@@ -302,7 +302,7 @@ CASES = [
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])
-def test_roundtrip_serialization(case: Dict[str, Any], tmp_path: Path) -> None:
+def test_roundtrip_serialization(case: dict[str, Any], tmp_path: Path) -> None:
     obj = case["factory"]()
     register_builtin_loader(obj, TrustedLoader)
     handler = TrustedLoader.get(type(obj))

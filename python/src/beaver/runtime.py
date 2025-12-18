@@ -6,45 +6,82 @@ import contextlib
 import functools
 import inspect
 import json
+import os
 import re
 import tempfile
 import textwrap
 import time
 import types
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional
 from uuid import uuid4
-
-try:
-    import pyfory
-except ImportError:
-    import pickle
-
-    # Minimal stub for environments without pyfory (tests/dev)
-    class _StubFory:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def register_type(self, *_args, **_kwargs):
-            return None
-
-        def dumps(self, obj):
-            return pickle.dumps(obj)
-
-        def loads(self, payload):
-            return pickle.loads(payload)
-
-    pyfory = types.SimpleNamespace(Fory=_StubFory)
 
 from . import lib_support
 from .envelope import BeaverEnvelope
+from .policy import DEFAULT_POLICY, TRUSTED_POLICY, BeaverPolicy
+
+try:
+    import pyfory
+except ImportError as e:
+    raise ImportError(
+        "pyfory is required for beaver serialization; pickle fallback is disabled for security."
+    ) from e
+
+
+class SecurityError(Exception):
+    """Raised when a security policy violation is detected."""
+
+
+try:  # pragma: no cover
+    from pyfory.serializer import DataClassSerializer
+except Exception:  # pragma: no cover
+    DataClassSerializer = None  # type: ignore[assignment]
+
+
+if DataClassSerializer is not None:
+
+    class _LenientDataClassSerializer(DataClassSerializer):
+        """Dataclass serializer that ignores schema-hash mismatches in non-compatible mode.
+
+        This is only used as a targeted fallback for legacy Beaver internal types (Twin/LiveVar)
+        when payloads were produced by older runtimes whose pyfory schema hash differs.
+        """
+
+        def _read_header(self, buffer):
+            if not self.fory.compatible:
+                # Legacy/non-compatible payloads write an int32 schema hash first.
+                # We intentionally ignore it and continue reading fields in the current schema order.
+                buffer.read_int32()
+                return len(self._field_names)
+            return super()._read_header(buffer)
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            # Force using the Python implementation (not the JIT-generated read method),
+            # so our overridden _read_header takes effect.
+            self.read = lambda buffer: DataClassSerializer.read(self, buffer)  # type: ignore[method-assign]
+
 
 if TYPE_CHECKING:
     from .session import Session
 
 # Global context tracker for SyftBox-aware file operations
 _CURRENT_CONTEXT = None
+
+# Allowed modules for trusted loader imports (in trusted/non-interactive paths)
+_ALLOWED_LOADER_MODULES = {
+    "numpy",
+    "pandas",
+    "anndata",
+    "pathlib",
+    "io",
+    "gzip",
+    "json",
+    "csv",
+    "pyarrow",
+}
 
 
 def _get_current_context():
@@ -72,7 +109,7 @@ class TrustedLoader:
     The first decorator sets the serializer, the second sets the deserializer.
     """
 
-    _handlers: Dict[type, Dict[str, Any]] = {}
+    _handlers: dict[type, dict[str, Any]] = {}
 
     @classmethod
     def register(cls, typ: type, *, name: Optional[str] = None):
@@ -94,7 +131,7 @@ class TrustedLoader:
         return deco
 
     @classmethod
-    def get(cls, typ: type, *, auto_register: bool = True) -> Optional[Dict[str, Any]]:
+    def get(cls, typ: type, *, auto_register: bool = True) -> Optional[dict[str, Any]]:
         h = cls._handlers.get(typ)
         if h and h.get("serializer") and h.get("deserializer"):
             return h
@@ -294,28 +331,30 @@ def _sanitize_for_serialization(obj: Any) -> Any:
         return obj
 
     # Handle matplotlib Figure/Axes
-    try:
-        import matplotlib.figure
-        from matplotlib.axes import Axes
+    type_module = getattr(obj.__class__, "__module__", "") or ""
+    if type_module.startswith("matplotlib."):
+        try:
+            import matplotlib.figure
+            from matplotlib.axes import Axes
 
-        if isinstance(obj, matplotlib.figure.Figure):
-            import io
-
-            buf = io.BytesIO()
-            obj.savefig(buf, format="png", bbox_inches="tight", dpi=100)
-            buf.seek(0)
-            return {"_beaver_figure": True, "png_bytes": buf.getvalue()}
-        if isinstance(obj, Axes):
-            if obj.figure:
+            if isinstance(obj, matplotlib.figure.Figure):
                 import io
 
                 buf = io.BytesIO()
-                obj.figure.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+                obj.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                 buf.seek(0)
                 return {"_beaver_figure": True, "png_bytes": buf.getvalue()}
-            return {"_beaver_axes": True, "title": str(obj.get_title())}
-    except ImportError:
-        pass
+            if isinstance(obj, Axes):
+                if obj.figure:
+                    import io
+
+                    buf = io.BytesIO()
+                    obj.figure.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+                    buf.seek(0)
+                    return {"_beaver_figure": True, "png_bytes": buf.getvalue()}
+                return {"_beaver_axes": True, "title": str(obj.get_title())}
+        except ImportError:
+            pass
 
     # Handle numpy types
     try:
@@ -384,6 +423,196 @@ def _sanitize_for_serialization(obj: Any) -> Any:
     if any(mod in type_name for mod in ("scanpy", "anndata", "sklearn")):
         return {"_complex_object": True, "type": type_name}
     return obj
+
+
+def _validate_artifact_path(path: str | Path, *, backend=None) -> Path:
+    """Ensure artifact path stays within an allowlisted base directory."""
+    candidate = Path(path)
+    if ".." in candidate.parts:
+        raise SecurityError(f"Path traversal detected for artifact: {path}")
+    bases = []
+    if backend and getattr(backend, "data_dir", None):
+        bases.append(Path(backend.data_dir))
+    bases.append(Path.cwd())
+    # Project root (python/src/beaver/../../..)
+    with contextlib.suppress(Exception):
+        bases.append(Path(__file__).resolve().parents[3])
+    bases.append(Path(tempfile.gettempdir()))
+    # Detect SyftBox/BioVault root from "datasites" in path
+    # This handles cross-session artifact references within the same SyftBox installation
+    try:
+        parts = candidate.resolve().parts
+        if "datasites" in parts:
+            idx = parts.index("datasites")
+            syftbox_root = Path(*parts[:idx])
+            if syftbox_root.exists():
+                bases.append(syftbox_root)
+    except Exception:
+        pass
+
+    resolved_candidate = candidate.resolve()
+    for base in bases:
+        resolved_base = base.resolve()
+        try:
+            resolved_candidate.relative_to(resolved_base)
+            break
+        except ValueError:
+            continue
+    else:
+        raise SecurityError(f"Path traversal detected for artifact: {path}")
+
+    if resolved_candidate.is_symlink():
+        target = resolved_candidate.readlink().resolve()
+        for base in bases:
+            try:
+                target.relative_to(base.resolve())
+                break
+            except ValueError:
+                continue
+        else:
+            raise SecurityError(f"Symlink escape detected for artifact: {path}")
+    return resolved_candidate
+
+
+def _select_policy(policy=None, *, trust_loader: bool = False) -> BeaverPolicy:
+    """Select effective policy considering env overrides and trust_loader flag."""
+    if policy is not None:
+        return policy
+    # trust_loader=True implies TRUSTED_POLICY (allows functions)
+    if trust_loader:
+        return TRUSTED_POLICY
+    trusted_env = os.getenv("BEAVER_TRUSTED_POLICY", "").lower() in {"1", "true", "yes"} or (
+        os.getenv("BEAVER_TRUSTED_LOADERS", "").lower() in {"1", "true", "yes"}
+    )
+    if trusted_env:
+        return TRUSTED_POLICY
+    return DEFAULT_POLICY
+
+
+def _analyze_loader_source(src: str, allowed_imports: Optional[set[str]] = None) -> None:
+    """Static analysis of loader code to block dangerous patterns."""
+    import ast
+
+    dangerous_names = {"__import__", "eval", "exec", "compile", "open"}
+    dangerous_modules = {"os", "subprocess", "sys", "importlib", "builtins"}
+    allowed_imports = allowed_imports or _ALLOWED_LOADER_MODULES
+
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            mods = []
+            if isinstance(node, ast.Import):
+                mods = [alias.name.split(".")[0] for alias in node.names]
+            elif node.module:
+                mods = [node.module.split(".")[0]]
+            for mod in mods:
+                if mod in dangerous_modules:
+                    raise SecurityError(f"Blocked import in trusted loader: {mod}")
+                if allowed_imports and mod not in allowed_imports:
+                    raise SecurityError(f"Import not allowed in trusted loader: {mod}")
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            name = None
+            if isinstance(fn, ast.Name):
+                name = fn.id
+            elif isinstance(fn, ast.Attribute):
+                name = fn.attr
+            if name in dangerous_names:
+                raise SecurityError(f"Blocked call in trusted loader: {name}")
+            if (
+                isinstance(fn, ast.Name)
+                and fn.id == "__import__"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+            ):
+                modname = str(node.args[0].value).split(".")[0]
+                if modname in dangerous_modules:
+                    raise SecurityError(f"Blocked dynamic import: {modname}")
+
+
+def _loader_defined_functions(src: str) -> list[str]:
+    """Return top-level function names defined by loader source."""
+    import ast
+
+    try:
+        tree = ast.parse(src)
+    except Exception:
+        return []
+    return [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
+
+
+def _posixify_path(p: str | Path) -> str:
+    return str(p).replace("\\", "/")
+
+
+def _cross_platform_filename(path_str: str) -> str:
+    """Extract filename from a path that may be Windows or Unix format.
+
+    On POSIX systems, Path("C:\\Users\\...\\file.txt").name returns the entire
+    string because backslashes aren't path separators. This function handles
+    both Windows and Unix paths correctly on any platform.
+    """
+    if not path_str:
+        return path_str
+    normalized = path_str.replace("\\", "/")
+    return normalized.rsplit("/", 1)[-1]
+
+
+def _relative_posix_path(path: Path, base_dir: Optional[Path]) -> Optional[str]:
+    if base_dir is None:
+        return None
+    try:
+        rel = path.resolve().relative_to(base_dir.resolve())
+    except Exception:
+        return None
+    return _posixify_path(rel)
+
+
+def _trusted_loader_base_dir(artifact_dir: Optional[Path], backend) -> Optional[Path]:
+    """Choose a base dir for TrustedLoader relative paths.
+
+    We prefer storing paths relative to the *session* directory (not the session/data dir),
+    so loaders can only reference artifacts within the session tree (e.g. `data/foo.bin`).
+    """
+    if artifact_dir is not None:
+        resolved = Path(artifact_dir).resolve()
+        if resolved.name == "data":
+            return resolved.parent
+        return resolved
+    if backend is not None and getattr(backend, "data_dir", None) is not None:
+        # Allow relative-to-datasites-root paths like `<email>/shared/...`.
+        return (Path(backend.data_dir).resolve() / "datasites").resolve()
+    return None
+
+
+def _exec_restricted_loader(src: str, scope: dict) -> dict:
+    """Execute loader code in a RestrictedPython sandbox."""
+    try:
+        from RestrictedPython import compile_restricted
+        from RestrictedPython.Eval import default_guarded_getitem, default_guarded_getiter
+        from RestrictedPython.Guards import (
+            full_write_guard,
+            guarded_iter_unpack_sequence,
+            guarded_unpack_sequence,
+            safe_builtins,
+            safer_getattr,
+        )
+    except Exception as e:  # pragma: no cover - import error path
+        raise SecurityError(f"RestrictedPython not available: {e}") from e
+
+    bytecode = compile_restricted(src, filename="<trusted_loader>", mode="exec")
+    restricted_globals: dict = {
+        "__builtins__": safe_builtins,
+        "_getattr_": safer_getattr,
+        "_getitem_": default_guarded_getitem,
+        "_getiter_": default_guarded_getiter,
+        "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
+        "_unpack_sequence_": guarded_unpack_sequence,
+        "_write_": full_write_guard,
+    }
+    restricted_globals.update(scope)
+    exec(bytecode, restricted_globals, restricted_globals)
+    return restricted_globals
 
 
 def _prepare_for_sending(
@@ -456,10 +685,13 @@ def _prepare_for_sending(
             )
         )
         src_clean = textwrap.dedent(src_clean)
+        base_dir = _trusted_loader_base_dir(artifact_dir, backend)
+        # Prefer relative unix-style paths; avoid embedding OS absolute paths in payloads.
+        path_for_loader = _relative_posix_path(path, base_dir) or path.name
         result = {
             "_trusted_loader": True,
             "name": tl["name"],
-            "path": str(path),
+            "path": path_for_loader,
             "deserializer_src": src_clean,
         }
         if meta:
@@ -502,10 +734,12 @@ def _prepare_for_sending(
                 )
             )
             src_clean = textwrap.dedent(src_clean)
+            base_dir = _trusted_loader_base_dir(artifact_dir, backend)
+            path_for_loader = _relative_posix_path(path, base_dir) or path.name
             public_obj = {
                 "_trusted_loader": True,
                 "name": tl_pub["name"],
-                "path": str(path),
+                "path": path_for_loader,
                 "deserializer_src": src_clean,
             }
             if meta:
@@ -534,10 +768,12 @@ def _prepare_for_sending(
                     )
                 )
                 src_clean = textwrap.dedent(src_clean)
+                base_dir = _trusted_loader_base_dir(artifact_dir, backend)
+                path_for_loader = _relative_posix_path(path, base_dir) or path.name
                 private_obj = {
                     "_trusted_loader": True,
                     "name": tl_priv["name"],
-                    "path": str(path),
+                    "path": path_for_loader,
                     "deserializer_src": src_clean,
                 }
                 if meta:
@@ -579,10 +815,14 @@ def _prepare_for_sending(
                 live_interval=obj.live_interval,
             )
 
-        # Copy serializable captured outputs
-        for attr in ("public_stdout", "public_stderr", "private_stdout", "private_stderr"):
+        # Copy serializable captured outputs (public always, private only if preserving)
+        for attr in ("public_stdout", "public_stderr"):
             if hasattr(obj, attr):
                 setattr(new_twin, attr, getattr(obj, attr))
+        if preserve_private:
+            for attr in ("private_stdout", "private_stderr"):
+                if hasattr(obj, attr):
+                    setattr(new_twin, attr, getattr(obj, attr))
 
         # Convert captured figures to serializable format (dicts with PNG bytes)
         def convert_figures_for_sending(figs):
@@ -601,7 +841,8 @@ def _prepare_for_sending(
 
         if hasattr(obj, "public_figures") and obj.public_figures:
             new_twin.public_figures = convert_figures_for_sending(obj.public_figures)
-        if hasattr(obj, "private_figures") and obj.private_figures:
+        # Only include private figures if preserving private data
+        if preserve_private and hasattr(obj, "private_figures") and obj.private_figures:
             new_twin.private_figures = convert_figures_for_sending(obj.private_figures)
 
         return new_twin
@@ -670,7 +911,29 @@ def pack(
         recipients=recipients,
     )
 
-    fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
+    compatible_env = os.getenv("BEAVER_FORY_COMPATIBLE")
+    if compatible_env is None:
+        # Default to compatible mode for cross-machine (SyftBox) sharing.
+        fory_compatible = backend is not None
+    else:
+        fory_compatible = compatible_env.lower() in {"1", "true", "yes", "on"}
+
+    field_nullable_env = os.getenv("BEAVER_FORY_FIELD_NULLABLE")
+    if field_nullable_env is None:
+        # Nullable-by-default is more tolerant to Optional/type-hint inference differences.
+        fory_field_nullable = fory_compatible
+    else:
+        fory_field_nullable = field_nullable_env.lower() in {"1", "true", "yes", "on"}
+
+    effective_policy = _select_policy(policy)
+    fory = pyfory.Fory(
+        xlang=False,
+        ref=True,
+        strict=strict,
+        policy=effective_policy,
+        compatible=fory_compatible,
+        field_nullable=fory_field_nullable,
+    )
 
     # Register Twin type so it can be deserialized
     from .twin import Twin
@@ -686,6 +949,16 @@ def pack(
     manifest = _summarize(obj)
     manifest["size_bytes"] = len(payload)
     manifest["language"] = "python"
+    manifest["fory_compatible"] = fory_compatible
+    manifest["fory_field_nullable"] = fory_field_nullable
+    # Help debug cross-machine deserialization mismatches (pyfory schema hashes depend on runtime).
+    try:  # pragma: no cover
+        import platform
+
+        manifest["pyfory_version"] = getattr(pyfory, "__version__", "unknown")
+        manifest["python_version"] = platform.python_version()
+    except Exception:  # pragma: no cover
+        pass
 
     # If packing a ComputationRequest, add required_versions to manifest
     from .computation import ComputationRequest, _detect_function_imports_with_versions
@@ -740,9 +1013,10 @@ def write_envelope(envelope: BeaverEnvelope, out_dir: Path | str = ".") -> Path:
 
 def read_envelope(path: Path | str) -> BeaverEnvelope:
     """Load a BeaverEnvelope from disk."""
-    record = json.loads(Path(path).read_text())
+    path_obj = Path(path)
+    record = json.loads(path_obj.read_text())
     payload = base64.b64decode(record["payload_b64"])
-    return BeaverEnvelope(
+    env = BeaverEnvelope(
         version=record.get("version", 1),
         envelope_id=record.get("envelope_id"),
         sender=record.get("sender", "unknown"),
@@ -755,6 +1029,9 @@ def read_envelope(path: Path | str) -> BeaverEnvelope:
         reply_to=record.get("reply_to"),
         payload=payload,
     )
+    # Non-serialized hint used to resolve TrustedLoader relative artifact paths.
+    env._path = str(path_obj)  # type: ignore[attr-defined]
+    return env
 
 
 def unpack(
@@ -764,6 +1041,7 @@ def unpack(
     policy=None,
     auto_accept: bool = False,
     backend=None,
+    trust_loader: Optional[bool] = None,
 ) -> Any:
     """Deserialize the payload in a BeaverEnvelope.
 
@@ -773,26 +1051,172 @@ def unpack(
         policy: Deserialization policy
         auto_accept: If True, automatically accept trusted loaders without prompting
         backend: Optional SyftBoxBackend for reading encrypted artifact files
+        trust_loader: If True, run loader in trusted mode. If None, prompt on failure.
     """
     _install_builtin_aliases()
-    fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
+    effective_policy: BeaverPolicy = _select_policy(policy, trust_loader=bool(trust_loader))
 
-    # Register Twin type so it can be deserialized
-    from .twin import Twin
+    # Prefer sender settings when available (supports cross-OS / cross-Python patch sharing).
+    sender_manifest = envelope.manifest or {}
+    sender_compatible = sender_manifest.get("fory_compatible")
+    sender_field_nullable = sender_manifest.get("fory_field_nullable")
 
-    fory.register_type(Twin)
+    compatible_env = os.getenv("BEAVER_FORY_COMPATIBLE")
+    if compatible_env is None:
+        # Default to sender preference; if missing, enable for SyftBox/cross-machine mode.
+        fory_compatible = (
+            bool(sender_compatible) if sender_compatible is not None else backend is not None
+        )
+    else:
+        fory_compatible = compatible_env.lower() in {"1", "true", "yes", "on"}
 
-    # Register LiveVar type
-    from .live_var import LiveVar
+    field_nullable_env = os.getenv("BEAVER_FORY_FIELD_NULLABLE")
+    if field_nullable_env is None:
+        fory_field_nullable = (
+            bool(sender_field_nullable) if sender_field_nullable is not None else fory_compatible
+        )
+    else:
+        fory_field_nullable = field_nullable_env.lower() in {"1", "true", "yes", "on"}
 
-    fory.register_type(LiveVar)
+    def _loads_with(
+        *, compatible: bool, field_nullable: bool, lenient_internal_hash: bool = False
+    ) -> Any:
+        f = pyfory.Fory(
+            xlang=False,
+            ref=True,
+            strict=strict,
+            policy=effective_policy,
+            compatible=compatible,
+            field_nullable=field_nullable,
+        )
 
-    obj = fory.loads(envelope.payload)
-    obj = _resolve_trusted_loader(obj, auto_accept=auto_accept, backend=backend)
+        # Register Beaver internal types.
+        from .computation import ComputationRequest
+        from .live_var import LiveVar
+        from .twin import Twin
+
+        if lenient_internal_hash and _LenientDataClassSerializer is not None:
+            f.register_type(Twin, serializer=_LenientDataClassSerializer(f, Twin))
+            f.register_type(LiveVar, serializer=_LenientDataClassSerializer(f, LiveVar))
+            f.register_type(
+                ComputationRequest,
+                serializer=_LenientDataClassSerializer(f, ComputationRequest),
+            )
+        else:
+            f.register_type(Twin)
+            f.register_type(LiveVar)
+            f.register_type(ComputationRequest)
+
+        return f.loads(envelope.payload)
+
+    # Block pickle payloads outright (magic 0x80 precedes pickle protocol)
+    if envelope.payload.startswith(b"\x80"):
+        raise SecurityError("Pickle payloads are blocked.")
+
+    try:
+        obj = _loads_with(compatible=fory_compatible, field_nullable=fory_field_nullable)
+    except Exception as e:
+        primary_exc = e
+        primary_msg = str(e)
+        last_exc = e
+        last_msg = primary_msg
+
+        def _looks_like_out_of_bound(msg: str) -> bool:
+            return "out of bound" in msg or "read_varuint32" in msg
+
+        def _looks_like_hash_mismatch(msg: str) -> bool:
+            return "Hash " in msg and "not consistent with" in msg and "beaver." in msg
+
+        fallback_failures: list[str] = []
+        attempts: list[str] = [
+            f"compatible={fory_compatible} field_nullable={fory_field_nullable} (primary)"
+        ]
+
+        # If we don't know what mode the sender used (no manifest flags) and we're in compatible
+        # mode (common in SyftBox contexts), legacy non-compatible payloads can fail with
+        # buffer out-of-bound errors. Retry in non-compatible mode.
+        if (
+            fory_compatible
+            and compatible_env is None
+            and sender_compatible is None
+            and _looks_like_out_of_bound(last_msg)
+        ):
+            try:
+                attempts.append("compatible=False field_nullable=False (fallback legacy)")
+                obj = _loads_with(compatible=False, field_nullable=False)
+            except Exception as retry_exc:
+                last_exc = retry_exc
+                last_msg = str(retry_exc)
+                fallback_failures.append(f"legacy->non-compatible failed: {last_msg}")
+
+        # Legacy non-compatible payloads can fail on internal-type schema hash mismatches.
+        attempted_legacy_fallback = any("fallback legacy" in a for a in attempts)
+        if (not fory_compatible or attempted_legacy_fallback) and _looks_like_hash_mismatch(
+            last_msg
+        ):
+            try:
+                attempts.append(
+                    "compatible=False field_nullable=<same> lenient_internal_hash=True (fallback)"
+                )
+                obj = _loads_with(
+                    compatible=False,
+                    field_nullable=fory_field_nullable,
+                    lenient_internal_hash=True,
+                )
+            except Exception as retry_exc:
+                last_exc = retry_exc
+                last_msg = str(retry_exc)
+                fallback_failures.append(f"legacy->lenient-internal-hash failed: {last_msg}")
+
+        if "obj" not in locals():
+            msg = primary_msg
+            if fallback_failures:
+                msg += " (fallback failures: " + " | ".join(fallback_failures) + ")"
+            if _looks_like_hash_mismatch(msg):
+                sender_py = (envelope.manifest or {}).get("python_version")
+                sender_pf = (envelope.manifest or {}).get("pyfory_version")
+                receiver_py = None
+                receiver_pf = getattr(pyfory, "__version__", None)
+                try:  # pragma: no cover
+                    import platform
+
+                    receiver_py = platform.python_version()
+                except Exception:  # pragma: no cover
+                    receiver_py = None
+                msg += (
+                    " (Likely sender/receiver runtime mismatch; ensure both sides run the same Beaver code + pyfory version"
+                    + (
+                        f"; sender python={sender_py} pyfory={sender_pf}, receiver python={receiver_py} pyfory={receiver_pf}"
+                        if (sender_py or sender_pf or receiver_py or receiver_pf)
+                        else ""
+                    )
+                    + (
+                        "; if you're sharing across OS/Python patch versions, enable compatible mode with `BEAVER_FORY_COMPATIBLE=1` and republish"
+                        if not fory_compatible
+                        else ""
+                    )
+                    + ".)"
+                )
+            msg += f" (attempts: {', '.join(attempts)})"
+            raise SecurityError(f"Deserialization blocked by policy: {msg}") from last_exc
+    obj = _resolve_trusted_loader(
+        obj,
+        auto_accept=auto_accept,
+        backend=backend,
+        trust_loader=trust_loader,
+        envelope_path=getattr(envelope, "_path", None),
+    )
     return obj
 
 
-def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None) -> Any:
+def _resolve_trusted_loader(
+    obj: Any,
+    *,
+    auto_accept: bool = False,
+    backend=None,
+    trust_loader: Optional[bool] = None,
+    envelope_path: str | Path | None = None,
+) -> Any:
     """
     Resolve trusted-loader descriptors, prompting before execution.
 
@@ -802,6 +1226,9 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         obj: The object to resolve
         auto_accept: If True, automatically accept trusted loaders without prompting
         backend: Optional SyftBoxBackend for reading encrypted artifact files
+        trust_loader: If True, run loader in trusted mode (full builtins).
+                     If False, use RestrictedPython.
+                     If None (default), try RestrictedPython first and prompt on failure.
     """
     try:
         from .twin import CapturedFigure, Twin  # local import to avoid cycles
@@ -813,16 +1240,36 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         captured_figure_cls = None  # type: ignore
 
     if twin_cls is not None and isinstance(obj, twin_cls):
-        obj.public = _resolve_trusted_loader(obj.public, auto_accept=auto_accept, backend=backend)
-        obj.private = _resolve_trusted_loader(obj.private, auto_accept=auto_accept, backend=backend)
+        obj.public = _resolve_trusted_loader(
+            obj.public,
+            auto_accept=auto_accept,
+            backend=backend,
+            trust_loader=trust_loader,
+            envelope_path=envelope_path,
+        )
+        obj.private = _resolve_trusted_loader(
+            obj.private,
+            auto_accept=auto_accept,
+            backend=backend,
+            trust_loader=trust_loader,
+            envelope_path=envelope_path,
+        )
         # Also resolve captured figure lists (they contain _beaver_figure dicts)
         if hasattr(obj, "public_figures") and obj.public_figures:
             obj.public_figures = _resolve_trusted_loader(
-                obj.public_figures, auto_accept=auto_accept, backend=backend
+                obj.public_figures,
+                auto_accept=auto_accept,
+                backend=backend,
+                trust_loader=trust_loader,
+                envelope_path=envelope_path,
             )
         if hasattr(obj, "private_figures") and obj.private_figures:
             obj.private_figures = _resolve_trusted_loader(
-                obj.private_figures, auto_accept=auto_accept, backend=backend
+                obj.private_figures,
+                auto_accept=auto_accept,
+                backend=backend,
+                trust_loader=trust_loader,
+                envelope_path=envelope_path,
             )
         return obj
 
@@ -863,27 +1310,90 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
         src = obj.get("deserializer_src", "")
         meta = obj.get("meta")  # Embedded metadata (e.g., pandas kind/name)
 
+        backend_data_dir = None
+        if backend is not None and getattr(backend, "data_dir", None) is not None:
+            backend_data_dir = Path(backend.data_dir).resolve()
+
         # Translate path from sender's perspective to local view
         # If path contains /datasites/<identity>/, map to our local view
         # ALWAYS translate when backend is available - file is synced to our local view
-        if data_path and backend:
+        if data_path and backend and backend_data_dir is not None:
+            stored = str(data_path)
+            normalized = stored.replace("\\", "/")
+            lower = normalized.lower()
+            marker = "/datasites/"
+            idx = lower.find(marker)
+            if idx >= 0:
+                relative = normalized[idx + len(marker) :].lstrip("/")
+                parts = [p for p in relative.split("/") if p]
+                if len(parts) >= 2 and parts[1] in {"shared", "app_data", "public"}:
+                    data_path = str(Path(backend_data_dir) / "datasites" / relative)
+            elif normalized.startswith("datasites/"):
+                data_path = str(Path(backend_data_dir) / normalized)
+            else:
+                # Newer on-wire form may already be relative to datasites root:
+                #   <email>/shared/... or <email>/app_data/... or <email>/public/...
+                parts = [p for p in normalized.split("/") if p]
+                if len(parts) >= 2 and parts[1] in {"shared", "app_data", "public"}:
+                    data_path = str(Path(backend_data_dir) / "datasites" / normalized)
+
+        # Resolve relative unix-style paths against the envelope's directory when available.
+        if data_path and envelope_path is not None:
             import re
 
-            # Match paths like .../datasites/<email>/shared/...
-            match = re.search(r"/datasites/([^/]+)/(shared|app_data|public)/", data_path)
-            if match:
-                datasite_identity = match.group(1)
-                # Get path after the datasite identity
-                idx = data_path.find(f"/datasites/{datasite_identity}/")
-                if idx >= 0:
-                    relative_path = data_path[idx + len("/datasites/") :]
-                    # Translate to our local datasites folder
-                    translated = str(backend.data_dir / "datasites" / relative_path)
-                    # Always use translated path - file should be synced to our local view
-                    data_path = translated
+            stored = str(data_path)
+            normalized = stored.replace("\\", "/")
+            is_absolute = bool(
+                normalized.startswith("/")
+                or normalized.startswith("\\\\")
+                or re.match(r"^[A-Za-z]:", normalized)
+            )
+            if not is_absolute:
+                parts = [p for p in normalized.split("/") if p]
+                if ".." in parts:
+                    raise SecurityError(f"Path traversal detected for artifact: {data_path}")
+                # If the envelope lives in a session `data/` folder, treat paths as relative
+                # to the session directory (so artifacts use `data/<name>.bin`).
+                envelope_dir = Path(envelope_path).resolve().parent
+                session_base = envelope_dir.parent if envelope_dir.name == "data" else envelope_dir
+                candidate = session_base.joinpath(*parts)
+                # Back-compat: if older payloads stored filenames relative to `data/`, accept them.
+                if not candidate.exists():
+                    candidate_in_data = (session_base / "data").joinpath(*parts)
+                    if candidate_in_data.exists():
+                        candidate = candidate_in_data
+
+                # If the envelope was read from the unencrypted shadow cache, prefer the
+                # encrypted datasites path (read_with_shadow decrypts from encrypted path).
+                if backend_data_dir is not None:
+                    shadow_root = (backend_data_dir / "unencrypted").resolve()
+                    datasites_root = (backend_data_dir / "datasites").resolve()
+                    with contextlib.suppress(Exception):
+                        rel_from_shadow = candidate.resolve().relative_to(shadow_root)
+                        candidate2 = (datasites_root / rel_from_shadow).resolve()
+                        if candidate2.exists():
+                            candidate = candidate2
+
+                data_path = str(candidate)
+
+        # Validate artifact path to prevent traversal/symlink escapes
+        if data_path:
+            _validate_artifact_path(data_path, backend=backend)
+
+        defined_functions = _loader_defined_functions(src)
 
         preview = "\n".join(src.strip().splitlines()[:5])
-        if not auto_accept:
+        auto_accept_env = os.getenv("BEAVER_AUTO_ACCEPT", "").lower() in {"1", "true", "yes"}
+        non_interactive = False
+        try:
+            import sys
+
+            non_interactive = not sys.stdin or not sys.stdin.isatty() or "ipykernel" in sys.modules
+        except Exception:
+            non_interactive = True
+
+        effective_auto_accept = auto_accept or auto_accept_env or non_interactive
+        if not effective_auto_accept:
             resp = (
                 input(
                     f"Execute trusted loader '{name}'? [y/N]:\n{preview}\nSource: {data_path}\nProceed? "
@@ -894,7 +1404,7 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
             if resp not in ("y", "yes"):
                 raise RuntimeError("Loader not approved")
         # Build scope with common imports that deserializers might need
-        scope: Dict[str, Any] = {"TrustedLoader": TrustedLoader}
+        scope: dict[str, Any] = {"TrustedLoader": TrustedLoader, "Path": Path}
         # Try to import anndata (common for AnnData loaders)
         try:
             import anndata as ad
@@ -921,13 +1431,126 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
             pass
 
         # Inject metadata if available (eliminates need for .meta.json files)
+        # Note: avoid underscore prefix as RestrictedPython blocks such names
         if meta is not None:
-            scope["_beaver_meta"] = meta
+            scope["beaver_meta"] = meta
 
-        exec(src, scope, scope)
-        # Exclude TrustedLoader class and imported modules - we want the actual deserializer function
+        # Static analysis to block dangerous imports/calls
+        _analyze_loader_source(src, allowed_imports=_ALLOWED_LOADER_MODULES)
+
+        trusted_loader_env = os.getenv("BEAVER_TRUSTED_LOADERS", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+
+        def _run_trusted_loader():
+            """Execute loader in trusted mode with guarded imports."""
+            nonlocal scope
+
+            def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+                top = name.split(".")[0]
+                if top not in _ALLOWED_LOADER_MODULES:
+                    raise SecurityError(f"Import not allowed in trusted loader: {name}")
+                return __import__(name, globals, locals, fromlist, level)
+
+            safe_builtins = {
+                "len": len,
+                "range": range,
+                "str": str,
+                "int": int,
+                "float": float,
+                "bool": bool,
+                "dict": dict,
+                "list": list,
+                "tuple": tuple,
+                "set": set,
+                "bytes": bytes,
+                "object": object,
+                "type": type,
+                "isinstance": isinstance,
+                "print": print,
+                "Path": Path,
+                "__import__": _guarded_import,
+                "globals": lambda: scope,
+                "locals": lambda: scope,
+            }
+            scope["__builtins__"] = safe_builtins
+            exec(src, scope, scope)
+
+        def _prompt_for_trust(error_msg: str) -> bool:
+            """Prompt user to approve trusted mode execution."""
+            import sys
+
+            # Check if we're in non-interactive mode
+            try:
+                is_interactive = sys.stdin and sys.stdin.isatty() and "ipykernel" not in sys.modules
+            except Exception:
+                is_interactive = False
+
+            if not is_interactive:
+                return False
+
+            print(f"\n⚠️  Loader '{name}' failed in restricted mode: {error_msg}")
+            print(f"   Source preview:\n{preview}")
+            print(f"   Data path: {data_path}")
+            resp = input("   Allow trusted execution? [y/N]: ").strip().lower()
+            return resp in ("y", "yes")
+
+        # Determine execution mode
+        use_trusted = trust_loader is True or trusted_loader_env
+
+        if use_trusted:
+            # Trusted mode requested explicitly
+            try:
+                _run_trusted_loader()
+            except Exception as e:
+                raise SecurityError(f"Trusted loader execution blocked: {e}") from e
+        else:
+            # Try RestrictedPython first, prompt on failure if trust_loader is None
+            restricted_error = None
+            try:
+                scope = _exec_restricted_loader(src, scope)
+            except Exception as e:
+                restricted_error = e
+
+            if restricted_error is not None:
+                # RestrictedPython failed - check if we should prompt or fail
+                if trust_loader is False:
+                    # Explicitly disabled trusted mode
+                    raise SecurityError(
+                        f"Loader execution failed in restricted mode: {restricted_error}"
+                    ) from restricted_error
+
+                # trust_loader is None - prompt user
+                if _prompt_for_trust(str(restricted_error)):
+                    try:
+                        _run_trusted_loader()
+                    except Exception as e:
+                        raise SecurityError(f"Trusted loader execution blocked: {e}") from e
+                else:
+                    raise SecurityError(
+                        f"Loader execution failed in restricted mode (trusted mode not approved): "
+                        f"{restricted_error}"
+                    ) from restricted_error
+
+        # Merge back safe symbols from scope (exclude modules, frames, builtins, and private names)
+        safe_symbols = {}
+        for key, val in scope.items():
+            if key.startswith("_"):
+                continue
+            if key in {"TrustedLoader", "ad", "pd", "np", "anndata", "pandas", "numpy"}:
+                continue
+            if isinstance(val, (types.ModuleType, types.FrameType)):
+                continue
+            safe_symbols[key] = val
+
+        # Attach merged symbols onto scope to allow callers to access derived functions/objects
+        scope.update(safe_symbols)
+        # Exclude TrustedLoader class, Path, and imported modules - we want the actual deserializer function
         excluded = {
             TrustedLoader,
+            Path,
             scope.get("ad"),
             scope.get("pd"),
             scope.get("np"),
@@ -935,7 +1558,14 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
             scope.get("pandas"),
             scope.get("numpy"),
         }
-        deser_fn = next((v for v in scope.values() if callable(v) and v not in excluded), None)
+        deser_fn = None
+        for fn_name in defined_functions:
+            candidate = scope.get(fn_name)
+            if callable(candidate) and candidate not in excluded:
+                deser_fn = candidate
+                break
+        if deser_fn is None:
+            deser_fn = next((v for v in scope.values() if callable(v) and v not in excluded), None)
         if deser_fn is None:
             raise RuntimeError("No deserializer found in loader source")
 
@@ -968,13 +1598,17 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
                     )
 
                 file_path = Path(data_path)
+                # Use cross-platform filename extraction for display (handles Windows paths on POSIX)
+                display_filename = _cross_platform_filename(data_path)
                 if not file_path.exists():
                     if not waited:
-                        print(f"⏳ Waiting for artifact file to sync: {file_path.name}")
+                        print(
+                            f"⏳ Waiting for artifact file to sync: {display_filename} (at {file_path})"
+                        )
                         waited = True
                     if now - last_print >= spinner_interval:
                         spin_idx = (spin_idx + 1) % len(spinner_chars)
-                        print(f"{spinner_chars[spin_idx]} waiting for {file_path.name}", end="\r")
+                        print(f"{spinner_chars[spin_idx]} waiting for {display_filename}", end="\r")
                         last_print = now
                     _time.sleep(sync_poll)
                     continue
@@ -986,13 +1620,14 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
                     stable_since = now
                     if not waited:
                         print(
-                            f"⏳ Waiting for artifact file to sync: {file_path.name} ({current_size:,} bytes)"
+                            f"⏳ Waiting for artifact file to sync: {display_filename} "
+                            f"(at {file_path}, {current_size:,} bytes)"
                         )
                         waited = True
                     if now - last_print >= spinner_interval:
                         spin_idx = (spin_idx + 1) % len(spinner_chars)
                         print(
-                            f"{spinner_chars[spin_idx]} syncing {file_path.name} ({current_size:,} bytes)",
+                            f"{spinner_chars[spin_idx]} syncing {display_filename} ({current_size:,} bytes)",
                             end="\r",
                         )
                         last_print = now
@@ -1006,14 +1641,16 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
                 if now - last_print >= spinner_interval:
                     spin_idx = (spin_idx + 1) % len(spinner_chars)
                     print(
-                        f"{spinner_chars[spin_idx]} syncing {file_path.name} ({current_size:,} bytes)",
+                        f"{spinner_chars[spin_idx]} syncing {display_filename} ({current_size:,} bytes)",
                         end="\r",
                     )
                     last_print = now
                 _time.sleep(sync_poll)
 
             if waited:
-                print(f"\n✓ Artifact file synced: {Path(data_path).name} ({last_size:,} bytes)")
+                print(
+                    f"\n✓ Artifact file synced: {_cross_platform_filename(data_path)} ({last_size:,} bytes)"
+                )
             else:
                 print()
 
@@ -1040,14 +1677,36 @@ def _resolve_trusted_loader(obj: Any, *, auto_accept: bool = False, backend=None
                 temp_file.unlink()
 
     if isinstance(obj, list):
-        return [_resolve_trusted_loader(x, auto_accept=auto_accept, backend=backend) for x in obj]
+        return [
+            _resolve_trusted_loader(
+                x,
+                auto_accept=auto_accept,
+                backend=backend,
+                trust_loader=trust_loader,
+                envelope_path=envelope_path,
+            )
+            for x in obj
+        ]
     if isinstance(obj, tuple):
         return tuple(
-            _resolve_trusted_loader(x, auto_accept=auto_accept, backend=backend) for x in obj
+            _resolve_trusted_loader(
+                x,
+                auto_accept=auto_accept,
+                backend=backend,
+                trust_loader=trust_loader,
+                envelope_path=envelope_path,
+            )
+            for x in obj
         )
     if isinstance(obj, dict):
         return {
-            k: _resolve_trusted_loader(v, auto_accept=auto_accept, backend=backend)
+            k: _resolve_trusted_loader(
+                v,
+                auto_accept=auto_accept,
+                backend=backend,
+                trust_loader=trust_loader,
+                envelope_path=envelope_path,
+            )
             for k, v in obj.items()
         }
     return obj
@@ -1324,7 +1983,7 @@ def load_by_id(
     globals_ns: Optional[dict] = None,
     strict: bool = False,
     policy=None,
-) -> Tuple[Optional[BeaverEnvelope], Optional[Any]]:
+) -> tuple[Optional[BeaverEnvelope], Optional[Any]]:
     """Load and inject an envelope payload by id into caller's globals."""
     env = find_by_id(inbox, envelope_id)
     if env is None:
@@ -1350,7 +2009,14 @@ def list_inbox(inbox: Path | str, *, backend=None) -> list[BeaverEnvelope]:
     """
     inbox_path = Path(inbox)
     envelopes = []
-    for p in sorted(inbox_path.glob("*.beaver")):
+
+    # Collect all .beaver files from root and data/ subdirectory
+    beaver_files = list(inbox_path.glob("*.beaver"))
+    data_dir = inbox_path / "data"
+    if data_dir.exists():
+        beaver_files.extend(data_dir.glob("*.beaver"))
+
+    for p in sorted(beaver_files):
         try:
             if backend is not None and backend.uses_crypto:
                 # Use backend to decrypt encrypted files
@@ -1555,9 +2221,9 @@ def _install_builtin_aliases() -> None:
         "Optional": typing.Optional,
         "Union": typing.Union,
         "Any": typing.Any,
-        "Tuple": typing.Tuple,
-        "List": typing.List,
-        "Dict": typing.Dict,
+        "Tuple": tuple,
+        "List": list,
+        "Dict": dict,
     }
     for name, obj in aliases.items():
         if not hasattr(builtins, name):
@@ -1574,7 +2240,7 @@ def listen_once(
     strict: bool = False,
     policy=None,
     delete_after: bool = False,
-) -> Tuple[Optional[BeaverEnvelope], Optional[Any], Optional[Any]]:
+) -> tuple[Optional[BeaverEnvelope], Optional[Any], Optional[Any]]:
     """
     Process the oldest .beaver file in inbox once.
 
@@ -2098,7 +2764,7 @@ def wait_for_reply(
     strict: bool = False,
     policy=None,
     delete_after: bool = False,
-) -> Tuple[Optional[BeaverEnvelope], Optional[Any]]:
+) -> tuple[Optional[BeaverEnvelope], Optional[Any]]:
     """
     Poll an inbox for a reply envelope whose reply_to matches.
     """
@@ -2930,7 +3596,12 @@ class BeaverContext:
                         print(f"📬 Found existing message: {env.name or env.envelope_id[:12]}")
                         print(f"   From: {env.sender}")
                         if auto_load:
-                            obj = unpack(env, strict=self.strict, policy=self.policy)
+                            obj = unpack(
+                                env,
+                                strict=self.strict,
+                                policy=self.policy,
+                                backend=self._backend,
+                            )
                             return env, obj
                         return env
 
@@ -2948,22 +3619,27 @@ class BeaverContext:
         else:
             print("⏳ Waiting for any message...")
 
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            for inbox_path in candidate_inboxes:
-                for env in list_inbox(inbox_path, backend=self._backend):
-                    if env.envelope_id in seen_ids:
-                        continue  # Already seen
-                    seen_ids.add(env.envelope_id)
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                for inbox_path in candidate_inboxes:
+                    for env in list_inbox(inbox_path, backend=self._backend):
+                        if env.envelope_id in seen_ids:
+                            continue  # Already seen
+                        seen_ids.add(env.envelope_id)
 
-                    if _matches_filter(env):
-                        print(f"📬 New message: {env.name or env.envelope_id[:12]}")
-                        print(f"   From: {env.sender}")
+                        if _matches_filter(env):
+                            print(f"📬 New message: {env.name or env.envelope_id[:12]}")
+                            print(f"   From: {env.sender}")
 
-                        if auto_load:
-                            obj = unpack(env, strict=self.strict, policy=self.policy)
-                            return env, obj
-                        return env
+                            if auto_load:
+                                obj = unpack(
+                                    env,
+                                    strict=self.strict,
+                                    policy=self.policy,
+                                    backend=self._backend,
+                                )
+                                return env, obj
+                            return env
 
             time.sleep(poll_interval)
 
@@ -3058,12 +3734,18 @@ class BeaverContext:
 
         # First, check for existing matching requests (return immediately if found)
         # Try fast match first, then deep match for backwards compatibility
+        # Use TRUSTED_POLICY since ComputationRequest contains functions (for review, not execution)
         for inbox_path in candidate_inboxes:
             for env in list_inbox(inbox_path, backend=self._backend):
                 if _matches_target_fast(env):
                     print(f"📬 Found existing request: {env.name}")
                     print(f"   From: {env.sender}")
-                    obj = unpack(env, strict=self.strict, policy=self.policy)
+                    obj = unpack(
+                        env,
+                        strict=self.strict,
+                        policy=TRUSTED_POLICY,
+                        backend=self._backend,
+                    )
                     _mark_processed(env)
                     return obj
 
@@ -3072,7 +3754,12 @@ class BeaverContext:
             for inbox_path in candidate_inboxes:
                 for env in list_inbox(inbox_path, backend=self._backend):
                     if env.name and env.name.startswith("request_") and not _is_processed(env):
-                        obj = unpack(env, strict=self.strict, policy=self.policy)
+                        obj = unpack(
+                            env,
+                            strict=self.strict,
+                            policy=TRUSTED_POLICY,
+                            backend=self._backend,
+                        )
                         if _matches_target_deep(obj, env):
                             print(f"📬 Found existing request: {env.name}")
                             print(f"   From: {env.sender}")
@@ -3104,7 +3791,12 @@ class BeaverContext:
                     if _matches_target_fast(env):
                         print(f"📬 Request received: {env.name}")
                         print(f"   From: {env.sender}")
-                        obj = unpack(env, strict=self.strict, policy=self.policy)
+                        obj = unpack(
+                            env,
+                            strict=self.strict,
+                            policy=TRUSTED_POLICY,
+                            backend=self._backend,
+                        )
                         _mark_processed(env)
                         return obj
 
@@ -3115,7 +3807,12 @@ class BeaverContext:
                         and env.name.startswith("request_")
                         and not _is_processed(env)
                     ):
-                        obj = unpack(env, strict=self.strict, policy=self.policy)
+                        obj = unpack(
+                            env,
+                            strict=self.strict,
+                            policy=TRUSTED_POLICY,
+                            backend=self._backend,
+                        )
                         if _matches_target_deep(obj, env):
                             print(f"📬 Request received: {env.name}")
                             print(f"   From: {env.sender}")
@@ -3174,11 +3871,15 @@ class BeaverContext:
             print(f"   From: {env.sender}")
 
             # Load the response
-            obj = unpack(env, strict=self.strict, policy=self.policy)
+            obj = unpack(env, strict=self.strict, policy=self.policy, backend=self._backend)
 
-            # Update the twin's private value
+            # Update the twin's private value and captured outputs
             if hasattr(obj, "private"):
                 twin.private = obj.private
+                # Also copy captured outputs from the response
+                for attr in ("private_stdout", "private_stderr", "private_figures"):
+                    if hasattr(obj, attr):
+                        setattr(twin, attr, getattr(obj, attr))
             else:
                 twin.private = obj
 

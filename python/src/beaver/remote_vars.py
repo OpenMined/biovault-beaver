@@ -6,10 +6,11 @@ import contextlib
 import importlib
 import importlib.metadata
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 
@@ -17,9 +18,236 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _cross_platform_filename(path_str: str) -> str:
+    """Extract filename from a path that may be Windows or Unix format.
+
+    On POSIX systems, Path("C:\\Users\\...\\file.txt").name returns the entire
+    string because backslashes aren't path separators. This function handles
+    both Windows and Unix paths correctly on any platform.
+    """
+    if not path_str:
+        return path_str
+    normalized = path_str.replace("\\", "/")
+    return normalized.rsplit("/", 1)[-1]
+
+
+class DataLocationSecurityError(Exception):
+    """Raised when data_location contains a path traversal or absolute path attack."""
+
+    pass
+
+
+def _sanitize_data_location(path_str: str, *, base_dir: Path) -> str:
+    """
+    Sanitize a data_location path to prevent path traversal attacks.
+
+    This function ensures that:
+    1. The path is relative (no absolute paths allowed)
+    2. The path doesn't escape the base directory via ..
+    3. The path uses Unix-style separators (normalized internally)
+    4. No null bytes or URL-encoded traversal attempts
+
+    Args:
+        path_str: The path string to sanitize
+        base_dir: The base directory that the path should be relative to
+
+    Returns:
+        A sanitized, relative Unix-style path string
+
+    Raises:
+        DataLocationSecurityError: If the path is absolute or attempts traversal
+    """
+    import re
+    import urllib.parse
+
+    if not path_str:
+        raise DataLocationSecurityError("data_location cannot be empty")
+
+    # Check for null bytes (could truncate path in some systems)
+    if "\x00" in path_str:
+        raise DataLocationSecurityError(
+            f"data_location contains null byte (possible injection attack): {path_str!r}"
+        )
+
+    # Decode any URL-encoded characters to catch encoded traversal and encoded null bytes.
+    decoded = urllib.parse.unquote(path_str)
+    if "\x00" in decoded:
+        raise DataLocationSecurityError(
+            f"data_location contains encoded null byte (possible injection attack): {path_str!r}"
+        )
+
+    # Normalize separators to forward slashes for consistent checking
+    normalized = decoded.replace("\\", "/")
+
+    # Check for absolute paths (Unix or Windows-style)
+    # Unix: starts with /
+    # Windows: starts with drive letter like C: or \\
+    if normalized.startswith("/"):
+        raise DataLocationSecurityError(
+            f"data_location must be relative, not absolute Unix path: {path_str}"
+        )
+
+    if re.match(r"^[A-Za-z]:", normalized):
+        raise DataLocationSecurityError(
+            f"data_location must be relative, not absolute Windows path: {path_str}"
+        )
+
+    if normalized.startswith("\\\\"):
+        raise DataLocationSecurityError(f"data_location must be relative, not UNC path: {path_str}")
+
+    # Check for path traversal attempts
+    # Split on / and check each component
+    parts = normalized.split("/")
+    for part in parts:
+        if part == "..":
+            raise DataLocationSecurityError(
+                f"data_location contains path traversal (..): {path_str}"
+            )
+        # Also catch URL-encoded versions that might slip through
+        if "%2e%2e" in part.lower() or "%2f" in part.lower():
+            raise DataLocationSecurityError(
+                f"data_location contains encoded traversal attempt: {path_str}"
+            )
+
+    # Final safety check: resolve the path and verify it stays within base_dir
+    # This catches tricky cases like "foo/../../../etc/passwd"
+    resolved = (base_dir / normalized).resolve()
+    base_resolved = base_dir.resolve()
+
+    try:
+        resolved.relative_to(base_resolved)
+    except ValueError:
+        raise DataLocationSecurityError(
+            f"data_location resolves outside base directory: {path_str} -> {resolved}"
+        ) from None
+
+    return normalized
+
+
+def _resolve_data_location(relative_path: str, *, session_dir: Path) -> Path:
+    """
+    Resolve a relative data_location path against a session directory.
+
+    This is the read-side counterpart to _sanitize_data_location.
+    It takes a relative path (stored in remote_vars.json) and resolves
+    it to an absolute path on the current system.
+
+    Args:
+        relative_path: The relative path from data_location
+        session_dir: The session directory to resolve against
+
+    Returns:
+        Absolute Path to the data file
+    """
+    # Normalize to current platform's path separator
+    normalized = relative_path.replace("\\", "/")
+    parts = normalized.split("/")
+    result = session_dir
+    for part in parts:
+        if part and part != ".":
+            result = result / part
+    return result
+
+
+def _make_relative_data_location(absolute_path: Path, *, session_dir: Path) -> str:
+    """
+    Convert an absolute path to a relative data_location string.
+
+    Used when writing to remote_vars.json to store only relative paths.
+
+    Args:
+        absolute_path: The absolute path to the data file
+        session_dir: The session directory to make the path relative to
+
+    Returns:
+        A relative Unix-style path string
+    """
+    try:
+        relative = absolute_path.resolve().relative_to(session_dir.resolve())
+        # Always use Unix-style separators for cross-platform compatibility
+        return str(relative).replace("\\", "/")
+    except ValueError:
+        raise DataLocationSecurityError(
+            f"Path {absolute_path} is not within session directory {session_dir}"
+        ) from None
+
+
+@dataclass(frozen=True)
+class NotReady:
+    """Sentinel returned when a remote var exists but isn't locally available yet.
+
+    This avoids ambiguity with a legitimate loaded value of `None`.
+    """
+
+    name: str
+    owner: Optional[str] = None
+    data_location: Optional[str] = None
+    reason: Optional[str] = None
+    expected_local_path: Optional[str] = None
+    expected_local_exists: Optional[bool] = None
+    hint: Optional[str] = None
+
+    def __bool__(self) -> bool:  # pragma: no cover
+        return False
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return str(self)
+
+    def __str__(self) -> str:  # pragma: no cover
+        def _display_data_location(dl: str) -> str:
+            # Work with legacy absolute sender paths, but avoid spewing them in notebooks.
+            normalized = dl.replace("\\", "/")
+            is_absolute_unix = normalized.startswith("/")
+            is_absolute_unc = dl.startswith("\\\\")
+            import re
+
+            is_absolute_win = bool(re.match(r"^[A-Za-z]:", normalized))
+            if is_absolute_unix or is_absolute_win or is_absolute_unc:
+                return f"(legacy absolute) {Path(dl).name}"
+            return dl
+
+        def _redact_abs_path(p: str) -> str:
+            try:
+                home = str(Path.home())
+                if p.startswith(home + os.sep) or p == home:
+                    return "~" + p[len(home) :]
+            except Exception:
+                pass
+            return p
+
+        lines = [f"Remote var '{self.name}' is not ready yet"]
+        if self.owner:
+            lines.append(f"  owner: {self.owner}")
+        if self.reason:
+            lines.append(f"  reason: {self.reason}")
+        if self.expected_local_path:
+            lines.append(f"  expected_local_path: {_redact_abs_path(self.expected_local_path)}")
+            if self.expected_local_exists is not None:
+                lines.append(f"  expected_local_exists: {self.expected_local_exists}")
+        if self.data_location:
+            lines.append(f"  data_location: {_display_data_location(self.data_location)}")
+        if self.hint:
+            lines.append(f"  hint: {self.hint}")
+        return "\n".join(lines)
+
+    def _repr_html_(self) -> str:  # pragma: no cover
+        esc = str(self).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return f"<pre>{esc}</pre>"
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "owner": self.owner,
+            "data_location": self.data_location,
+            "reason": self.reason,
+            "expected_local_path": self.expected_local_path,
+            "expected_local_exists": self.expected_local_exists,
+            "hint": self.hint,
+        }
+
+
 def _is_uv_venv() -> bool:
     """Check if we're running in a uv-managed virtual environment."""
-    import os
     import sys
 
     # Check for uv marker file in the venv
@@ -111,13 +339,13 @@ def _prompt_install_deps(missing: list[str], var_name: str) -> bool:
         return False
 
 
-def _detect_dependencies(obj: Any) -> Dict[str, str]:
+def _detect_dependencies(obj: Any) -> dict[str, str]:
     """
     Best-effort dependency detection for shared objects.
 
     Captures key package versions so receivers know what to install to load.
     """
-    deps: Dict[str, str] = {}
+    deps: dict[str, str] = {}
 
     def add(pkg: str):
         try:
@@ -141,6 +369,15 @@ def _detect_dependencies(obj: Any) -> Dict[str, str]:
         add("numpy")
 
     return deps
+
+
+def _in_ipython() -> bool:
+    try:
+        from IPython import get_ipython  # type: ignore
+
+        return get_ipython() is not None
+    except Exception:
+        return False
 
 
 class _SafeDisplayProxy:
@@ -219,7 +456,7 @@ class RemoteVar:
     updated_at: str = field(default_factory=_iso_now)
     data_location: Optional[str] = None  # Path to actual .beaver file if sent
     _stored_value: Optional[Any] = None  # Actual value for simple types
-    deps: Dict[str, str] = field(default_factory=dict)  # dependency versions for loaders
+    deps: dict[str, str] = field(default_factory=dict)  # dependency versions for loaders
 
     def __repr__(self) -> str:
         type_info = self.var_type
@@ -279,7 +516,7 @@ class RemoteVarRegistry:
         self.session_id = session_id
         self._context = context
         self.peer = peer  # For session encryption
-        self.vars: Dict[str, RemoteVar] = {}
+        self.vars: dict[str, RemoteVar] = {}
         self._load()
 
     def _load(self):
@@ -474,10 +711,14 @@ class RemoteVarRegistry:
                     recipients=recipients,
                     hint="beaver-envelope",
                 )
-                data_location = str(data_path)
+                data_location = _make_relative_data_location(
+                    data_path, session_dir=self.registry_path.parent
+                )
             else:
                 data_path = write_envelope(env, out_dir=public_data_dir)
-                data_location = str(data_path)
+                data_location = _make_relative_data_location(
+                    data_path, session_dir=self.registry_path.parent
+                )
 
             remote_var = RemoteVar(
                 name=name,
@@ -588,17 +829,25 @@ class RemoteVarRegistry:
                             recipients=recipients,
                             hint="beaver-envelope",
                         )
-                        data_location = str(data_path)
+                        data_location = _make_relative_data_location(
+                            data_path, session_dir=self.registry_path.parent
+                        )
                     else:
                         # No peer, write plaintext
                         data_path = write_envelope(env, out_dir=public_data_dir)
-                        data_location = str(data_path)
+                        data_location = _make_relative_data_location(
+                            data_path, session_dir=self.registry_path.parent
+                        )
                 else:
                     data_path = write_envelope(env, out_dir=public_data_dir)
-                    data_location = str(data_path)
+                    data_location = _make_relative_data_location(
+                        data_path, session_dir=self.registry_path.parent
+                    )
             else:
                 data_path = write_envelope(env, out_dir=public_data_dir)
-                data_location = str(data_path)
+                data_location = _make_relative_data_location(
+                    data_path, session_dir=self.registry_path.parent
+                )
 
             stored_value = None  # Don't keep in memory
 
@@ -747,7 +996,9 @@ class RemoteVarRegistry:
             data_path = write_envelope(env, out_dir=public_data_dir)
 
         # Update metadata
-        remote_var.data_location = str(data_path)
+        remote_var.data_location = _make_relative_data_location(
+            data_path, session_dir=self.registry_path.parent
+        )
         remote_var.updated_at = _iso_now()
 
         self._save()
@@ -808,7 +1059,9 @@ class RemoteVarRegistry:
             data_path = write_envelope(env, out_dir=public_data_dir)
 
         # Update metadata
-        remote_var.data_location = str(data_path)
+        remote_var.data_location = _make_relative_data_location(
+            data_path, session_dir=self.registry_path.parent
+        )
         remote_var.updated_at = _iso_now()
 
         self._save()
@@ -995,7 +1248,7 @@ class RemoteVarView:
         self.data_dir = Path(data_dir)
         self.context = context
         self.session = session  # Store session reference
-        self.vars: Dict[str, RemoteVar] = {}
+        self.vars: dict[str, RemoteVar] = {}
         self.refresh()
 
     def refresh(self):
@@ -1099,11 +1352,15 @@ class RemoteVarPointer:
                 missing.append(pkg)
         return missing
 
-    def _auto_load_twin(self, *, auto_accept: bool = False):
+    def _auto_load_twin(
+        self, *, auto_accept: bool = False, policy=None, trust_loader: bool | None = None
+    ):
         """Auto-load Twin from published location if this is a Twin type.
 
         Args:
             auto_accept: If True, automatically accept trusted loaders without prompting
+            policy: Deserialization policy to enforce (default: runtime default)
+            trust_loader: If True, run loader in trusted mode. If None, prompt on failure.
         """
         # Check if already loaded
         if self._loaded_twin is not None:
@@ -1135,35 +1392,66 @@ class RemoteVarPointer:
 
                 from .runtime import read_envelope
 
-                # The stored data_location is absolute from owner's perspective
-                # We need to resolve it relative to our local view
-                stored_path = Path(self.remote_var.data_location)
-                filename = stored_path.name
+                data_location = self.remote_var.data_location
 
-                # Primary: use our local view's data directory
-                if hasattr(self.view, "data_dir"):
-                    data_path = Path(self.view.data_dir) / filename
-                elif hasattr(self.view, "registry_path"):
-                    data_path = Path(self.view.registry_path).parent / "data" / filename
+                # Determine the session directory for path resolution
+                if hasattr(self.view, "registry_path"):
+                    session_dir = Path(self.view.registry_path).parent
+                elif hasattr(self.view, "data_dir"):
+                    session_dir = Path(self.view.data_dir).parent
                 else:
-                    data_path = stored_path
+                    session_dir = None
 
-                # Fallback: translate stored path to our local view
-                # Pattern: sandbox/<owner>/datasites/<datasite>/... -> sandbox/<us>/datasites/<datasite>/...
-                if not data_path.exists():
-                    stored_str = str(stored_path)
-                    # Match sandbox/<identity>/datasites/ pattern
-                    match = re.search(r"/sandbox/([^/]+)/datasites/", stored_str)
-                    if match and hasattr(self.view, "context") and self.view.context:
-                        ctx = self.view.context
-                        if hasattr(ctx, "_backend") and ctx._backend:
-                            # Get our local datasites root
-                            our_datasites = str(ctx._backend.data_dir / "datasites")
-                            # Find where /datasites/ starts in stored path
-                            idx = stored_str.find("/datasites/")
-                            if idx >= 0:
+                # Check if data_location is relative (new format) or absolute (legacy)
+                is_relative = not (
+                    data_location.startswith("/")
+                    or re.match(r"^[A-Za-z]:", data_location)
+                    or data_location.startswith("\\\\")
+                )
+
+                if is_relative and session_dir:
+                    # New format: relative path - validate and resolve
+                    try:
+                        data_location = _sanitize_data_location(data_location, base_dir=session_dir)
+                        data_path = _resolve_data_location(data_location, session_dir=session_dir)
+                    except DataLocationSecurityError as e:
+                        self._last_error = e
+                        return None
+                else:
+                    # Legacy format: absolute path from sender's system
+                    # Extract just the filename and look in our local data directory
+                    # Use cross-platform extraction since Path.name fails for Windows paths on POSIX
+                    filename = _cross_platform_filename(data_location)
+
+                    # Primary: use our local view's data directory
+                    if hasattr(self.view, "data_dir"):
+                        data_path = Path(self.view.data_dir) / filename
+                    elif hasattr(self.view, "registry_path"):
+                        data_path = Path(self.view.registry_path).parent / "data" / filename
+                    else:
+                        # Last resort: try the absolute path (unlikely to work cross-platform)
+                        data_path = Path(data_location)
+
+                    # Fallback: translate stored path to our local view (legacy interop)
+                    # Pattern: /sandbox/<owner>/datasites/<datasite>/... or C:\...\datasites\...
+                    if not data_path.exists():
+                        stored_str = data_location
+                        # Try to find datasites in any format (Windows or Unix)
+                        idx = -1
+                        for sep in ["/datasites/", "\\datasites\\", "/datasites\\", "\\datasites/"]:
+                            found_idx = stored_str.lower().find(sep.lower())
+                            if found_idx >= 0:
+                                idx = found_idx + len(sep)
+                                break
+                        if idx >= 0 and hasattr(self.view, "context") and self.view.context:
+                            ctx = self.view.context
+                            if hasattr(ctx, "_backend") and ctx._backend:
+                                # Get our local datasites root
+                                our_datasites = str(ctx._backend.data_dir / "datasites")
                                 # Take everything after /datasites/ and append to our root
-                                relative = stored_str[idx + len("/datasites/") :]
+                                relative = stored_str[idx:]
+                                # Normalize path separators
+                                relative = relative.replace("\\", "/")
                                 translated = Path(our_datasites) / relative
                                 if translated.exists():
                                     data_path = translated
@@ -1219,13 +1507,20 @@ class RemoteVarPointer:
                                     reply_to=record.get("reply_to"),
                                     payload=payload,
                                 )
+                                env._path = str(data_path)  # type: ignore[attr-defined]
                             else:
                                 env = read_envelope(data_path)
                         else:
                             env = read_envelope(data_path)
                     else:
                         env = read_envelope(data_path)
-                    twin = env.load(inject=False, auto_accept=auto_accept, backend=backend)
+                    twin = env.load(
+                        inject=False,
+                        auto_accept=auto_accept,
+                        backend=backend,
+                        policy=policy,
+                        trust_loader=trust_loader,
+                    )
                     if hasattr(twin, "public"):
                         twin.public = _ensure_sparse_shapes(twin.public)
                         # Swap public for a safe display proxy, keep raw on the side
@@ -1314,7 +1609,7 @@ class RemoteVarPointer:
         # If the Twin couldn't be loaded yet, but the caller is asking for .public/.private/.value,
         # try one more time and give a helpful error (including dependency hints).
         if name in {"public", "private", "value"}:
-            twin = self._auto_load_twin()
+            twin = self._auto_load_twin(policy=None)
             if twin is not None and hasattr(twin, name):
                 value = getattr(twin, name)
                 try:
@@ -1352,7 +1647,13 @@ class RemoteVarPointer:
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def load(
-        self, *, inject: bool = True, as_name: Optional[str] = None, auto_accept: bool = False
+        self,
+        *,
+        inject: bool = True,
+        as_name: Optional[str] = None,
+        auto_accept: bool = False,
+        policy=None,
+        trust_loader: bool | None = None,
     ):
         """
         Load the remote variable data.
@@ -1364,6 +1665,9 @@ class RemoteVarPointer:
             inject: Whether to inject into globals
             as_name: Name to use in globals (defaults to remote var name)
             auto_accept: If True, automatically accept trusted loaders without prompting
+            trust_loader: If True, run loader in trusted mode (full builtins).
+                         If False, use RestrictedPython only (may fail).
+                         If None (default), try RestrictedPython first and prompt on failure.
 
         Returns:
             The loaded object (Twin, simple value, or pointer if not available)
@@ -1399,8 +1703,8 @@ class RemoteVarPointer:
                 try:
                     from .runtime import read_envelope
 
-                    stored_path = Path(self.remote_var.data_location)
-                    filename = stored_path.name
+                    # Use cross-platform extraction since Path.name fails for Windows paths on POSIX
+                    filename = _cross_platform_filename(self.remote_var.data_location)
 
                     # Use our local view's data directory
                     if hasattr(self.view, "data_dir"):
@@ -1408,7 +1712,7 @@ class RemoteVarPointer:
                     elif hasattr(self.view, "registry_path"):
                         data_path = Path(self.view.registry_path).parent / "data" / filename
                     else:
-                        data_path = stored_path
+                        data_path = Path(self.remote_var.data_location)
 
                     # Try by name if not found
                     if not data_path.exists() and hasattr(self.view, "data_dir"):
@@ -1444,6 +1748,7 @@ class RemoteVarPointer:
                                         reply_to=record.get("reply_to"),
                                         payload=payload,
                                     )
+                                    env._path = str(data_path)  # type: ignore[attr-defined]
                                 else:
                                     env = read_envelope(data_path)
                             else:
@@ -1451,7 +1756,12 @@ class RemoteVarPointer:
                         else:
                             env = read_envelope(data_path)
 
-                        live_var = env.load(inject=False, auto_accept=auto_accept, backend=backend)
+                        live_var = env.load(
+                            inject=False,
+                            auto_accept=auto_accept,
+                            backend=backend,
+                            trust_loader=trust_loader,
+                        )
                         if isinstance(live_var, LiveVar):
                             if inject:
                                 import inspect
@@ -1471,12 +1781,15 @@ class RemoteVarPointer:
 
         # Check if this is a Twin type
         is_twin = self.remote_var.var_type.startswith("Twin[")
+        is_transient = False  # Default for non-Twin types
 
         if is_twin:
             # Try to load from published data location first
             from .twin import Twin
 
-            twin = self._auto_load_twin(auto_accept=auto_accept)
+            twin = self._auto_load_twin(
+                auto_accept=auto_accept, policy=policy, trust_loader=trust_loader
+            )
             if twin is not None:
                 if inject:
                     import inspect
@@ -1530,26 +1843,50 @@ class RemoteVarPointer:
                     f"💡 Or you can request access with: bv.peer('{self.remote_var.owner}').send_request('{var_name}')"
                 )
 
-            # For transient errors (sync in progress), return None so retry loops continue
-            # For permanent errors, inject pointer and return self
-            if is_transient:
-                return None
+        # For transient errors (sync in progress), return None so retry loops continue
+        # For permanent errors, inject pointer and return self
+        if is_transient:
+            expected_local_path = None
+            expected_local_exists = None
+            if self.remote_var.data_location:
+                try:
+                    # Use cross-platform extraction since Path.name fails for Windows paths on POSIX
+                    filename = _cross_platform_filename(self.remote_var.data_location)
+                    if hasattr(self.view, "data_dir"):
+                        data_path = Path(self.view.data_dir) / filename
+                    elif hasattr(self.view, "registry_path"):
+                        data_path = Path(self.view.registry_path).parent / "data" / filename
+                    else:
+                        data_path = None
+                    if data_path is not None:
+                        expected_local_path = str(data_path)
+                        expected_local_exists = data_path.exists()
+                except Exception:
+                    expected_local_path = None
+                    expected_local_exists = None
 
+            return NotReady(
+                name=var_name,
+                owner=self.remote_var.owner,
+                data_location=self.remote_var.data_location,
+                reason="waiting for sync/decrypt",
+                expected_local_path=expected_local_path,
+                expected_local_exists=expected_local_exists,
+                hint="Retry after SyftBox finishes syncing/decrypting (or increase wait timeout).",
+            )
+
+        # For simple types, return stored value if available
+        elif self.remote_var.var_type == "NoneType":
+            value = None
             if inject:
                 import inspect
 
                 frame = inspect.currentframe()
                 if frame and frame.f_back:
                     caller_globals = frame.f_back.f_globals
-                    # Inject the pointer for now
-                    caller_globals[var_name] = self
-                    print(
-                        f"✓ Injected pointer '{var_name}' into globals (will need actual data to use)"
-                    )
-
-            return self
-
-        # For simple types, return stored value if available
+                    caller_globals[var_name] = value
+                    print(f"✓ Loaded '{var_name}' = None")
+            return value
         elif self.remote_var._stored_value is not None:
             value = self.remote_var._stored_value
             if inject:
@@ -1597,7 +1934,7 @@ class RemoteVarPointer:
         elif self._last_error is not None:
             twin = None
         else:
-            twin = self._auto_load_twin()
+            twin = self._auto_load_twin(policy=None)
         if twin is not None and hasattr(twin, "_repr_html_"):
             return twin._repr_html_()  # type: ignore[attr-defined]
         return (

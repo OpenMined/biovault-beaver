@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Optional
 from uuid import uuid4
 
 # Global registry: (func_id, owner) -> callable
-_FUNC_REGISTRY: Dict[Tuple[str, str], Callable] = {}
+_FUNC_REGISTRY: dict[tuple[str, str], Callable] = {}
 
 
 def register_func(func: Callable, owner: str, name: Optional[str] = None) -> str:

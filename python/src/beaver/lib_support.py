@@ -4,7 +4,7 @@ import importlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, List, Set, Type
+from typing import Any, Callable
 
 
 @dataclass
@@ -13,10 +13,10 @@ class _LazyLoaderSpec:
 
     name: str
     matcher: Callable[[Any], bool]
-    registrar: Callable[[Any, Type[Any]], None]
-    registered_types: Set[Type[Any]] = field(default_factory=set)
+    registrar: Callable[[Any, type[Any]], None]
+    registered_types: set[type[Any]] = field(default_factory=set)
 
-    def maybe_register(self, obj: Any, trusted_loader_cls: Type[Any]) -> None:
+    def maybe_register(self, obj: Any, trusted_loader_cls: type[Any]) -> None:
         obj_type = type(obj)
         if obj_type in self.registered_types:
             return
@@ -42,7 +42,7 @@ def _require(module_name: str, *, feature: str):
         ) from exc
 
 
-def _register_numpy(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any] = None) -> None:
+def _register_numpy(obj: Any, trusted_loader_cls: type[Any], obj_type: type[Any] = None) -> None:
     np = _require("numpy", feature="numpy array serialization")
 
     if obj_type is None:
@@ -71,7 +71,7 @@ def _match_pandas(obj: Any) -> bool:
     return getattr(obj.__class__, "__module__", "").startswith("pandas")
 
 
-def _register_pandas(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any] = None) -> None:
+def _register_pandas(obj: Any, trusted_loader_cls: type[Any], obj_type: type[Any] = None) -> None:
     pd = _require("pandas", feature="pandas serialization")
 
     if obj_type is None:
@@ -82,9 +82,9 @@ def _register_pandas(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any
     def pandas_serialize_file(frame_like: Any, path: Path) -> dict:
         """Serialize pandas object to parquet. Returns metadata dict."""
         _require("pyarrow", feature="pandas parquet serialization")
-        from pathlib import Path as _Path
+        from pathlib import Path as PathCls
 
-        path = _Path(path)
+        path = PathCls(path)
         if isinstance(frame_like, pd.DataFrame):
             meta = {"kind": "dataframe"}
             frame_like.to_parquet(path, index=True, engine="pyarrow")
@@ -119,31 +119,34 @@ def _register_pandas(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any
                 "pyarrow is required to deserialize pandas parquet payloads. "
                 'Install with `pip install "biovault-beaver[lib-support]"`.'
             ) from exc
-        from pathlib import Path as _Path
+        # Use Path from globals (injected by runtime) to avoid RestrictedPython import issues
+        # Fall back to import if not available (e.g., direct function call outside runtime)
+        Path = globals().get("Path")  # noqa: N806
+        if Path is None:
+            from pathlib import Path
+        path = Path(path)
 
-        path = _Path(path)
-
-        # If meta not passed, try to get from _beaver_meta (injected) or .meta.json file
+        # If meta not passed, try to get from beaver_meta (injected) or .meta.json file
         if meta is None:
-            _injected_meta = globals().get("_beaver_meta")
-            if _injected_meta is not None:
-                meta = _injected_meta
+            injected_meta = globals().get("beaver_meta")
+            if injected_meta is not None:
+                meta = injected_meta
             else:
                 # Fallback: read from .meta.json file (legacy support)
                 import json as json_local
 
                 meta_path = path.with_suffix(path.suffix + ".meta.json")
-                _read_text_fn = globals().get("_beaver_read_text")
-                if _read_text_fn is not None:
-                    meta_text = _read_text_fn(str(meta_path))
+                read_text_fn = globals().get("beaver_read_text")
+                if read_text_fn is not None:
+                    meta_text = read_text_fn(str(meta_path))
                 else:
                     meta_text = meta_path.read_text()
                 meta = json_local.loads(meta_text)
 
         # Read parquet data (may be encrypted)
-        _read_bytes_fn = globals().get("_beaver_read_bytes")
-        if _read_bytes_fn is not None:
-            parquet_bytes = _read_bytes_fn(str(path))
+        read_bytes_fn = globals().get("beaver_read_bytes")
+        if read_bytes_fn is not None:
+            parquet_bytes = read_bytes_fn(str(path))
             parquet_buffer = io_local.BytesIO(parquet_bytes)
         else:
             parquet_buffer = path
@@ -168,7 +171,7 @@ def _match_pillow(obj: Any) -> bool:
     return getattr(obj.__class__, "__module__", "").startswith("PIL.")
 
 
-def _register_pillow(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any] = None) -> None:
+def _register_pillow(obj: Any, trusted_loader_cls: type[Any], obj_type: type[Any] = None) -> None:
     from PIL import Image  # type: ignore
 
     _require("PIL", feature="Pillow image serialization")
@@ -199,7 +202,7 @@ def _match_matplotlib(obj: Any) -> bool:
 
 
 def _register_matplotlib(
-    obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any] = None
+    obj: Any, trusted_loader_cls: type[Any], obj_type: type[Any] = None
 ) -> None:
     import matplotlib
 
@@ -235,7 +238,7 @@ def _match_torch(obj: Any) -> bool:
     )
 
 
-def _register_torch(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any] = None) -> None:
+def _register_torch(obj: Any, trusted_loader_cls: type[Any], obj_type: type[Any] = None) -> None:
     from safetensors.torch import save_file
 
     if obj_type is None:
@@ -287,7 +290,7 @@ def _match_anndata(obj: Any) -> bool:
     return getattr(obj.__class__, "__module__", "").startswith("anndata")
 
 
-def _register_anndata(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[Any] = None) -> None:
+def _register_anndata(obj: Any, trusted_loader_cls: type[Any], obj_type: type[Any] = None) -> None:
     if obj_type is None:
         obj_type = type(obj)
     name = f"{obj_type.__module__}.{obj_type.__name__}"
@@ -308,7 +311,7 @@ def _register_anndata(obj: Any, trusted_loader_cls: Type[Any], obj_type: Type[An
         return ad_local.read_h5ad(path)
 
 
-_SPECS: List[_LazyLoaderSpec] = [
+_SPECS: list[_LazyLoaderSpec] = [
     _LazyLoaderSpec("numpy.ndarray", _match_numpy, _register_numpy),
     _LazyLoaderSpec("pandas", _match_pandas, _register_pandas),
     _LazyLoaderSpec("pillow.Image", _match_pillow, _register_pillow),
@@ -318,7 +321,7 @@ _SPECS: List[_LazyLoaderSpec] = [
 ]
 
 
-def register_builtin_loader(obj: Any, trusted_loader_cls: Type[Any]) -> None:
+def register_builtin_loader(obj: Any, trusted_loader_cls: type[Any]) -> None:
     """
     Lazily register a TrustedLoader handler for a known library object.
 
@@ -330,7 +333,7 @@ def register_builtin_loader(obj: Any, trusted_loader_cls: Type[Any]) -> None:
         spec.maybe_register(obj, trusted_loader_cls)
 
 
-def register_by_type(typ: Type[Any], trusted_loader_cls: Type[Any]) -> bool:
+def register_by_type(typ: type[Any], trusted_loader_cls: type[Any]) -> bool:
     """
     Register a TrustedLoader handler by type (without needing an instance).
 

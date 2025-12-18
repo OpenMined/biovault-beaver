@@ -8,7 +8,7 @@ import types
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
 import yaml
@@ -29,7 +29,7 @@ class DatasetPart:
     size_bytes: int
     compressed_size_bytes: int
     file_format: str
-    _manifest: Optional[Dict] = None
+    _manifest: Optional[dict] = None
 
     def __repr__(self) -> str:
         size_mb = self.size_bytes / (1024 * 1024)
@@ -45,7 +45,7 @@ class DatasetPart:
             f"  .info()                       # Show detailed manifest info"
         )
 
-    def _fetch_manifest(self) -> Dict:
+    def _fetch_manifest(self) -> dict:
         """Fetch and cache the YAML manifest."""
         if self._manifest is not None:
             return self._manifest
@@ -148,7 +148,7 @@ class SampleDataset:
 
         return "\n".join(lines)
 
-    def download(self, path: Optional[Path] = None, verbose: bool = True) -> Dict[str, Path]:
+    def download(self, path: Optional[Path] = None, verbose: bool = True) -> dict[str, Path]:
         """
         Download both mock and real parts.
 
@@ -326,7 +326,7 @@ def _download_file(url: str, dest_path: Path, desc: str = "Downloading") -> None
 
 
 def _download_from_manifest(
-    manifest: Dict, yaml_url: str, output_path: Path, verbose: bool = True
+    manifest: dict, yaml_url: str, output_path: Path, verbose: bool = True
 ) -> Path:
     """Download and assemble a file from its manifest."""
     try:
@@ -471,7 +471,7 @@ Cache location: ~/.biovault/cache/beaver/sample-data/
 """
 
 
-def list_datasets() -> List[str]:
+def list_datasets() -> list[str]:
     """List all available sample datasets."""
     return ["single_cell"]
 

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Optional
 from uuid import uuid4
 
 if TYPE_CHECKING:
@@ -48,8 +48,8 @@ def _pkg_version(name: str) -> Optional[str]:
         return None
 
 
-def _version_info() -> Dict[str, Optional[str]]:
-    info: Dict[str, Optional[str]] = {}
+def _version_info() -> dict[str, Optional[str]]:
+    info: dict[str, Optional[str]] = {}
     info["beaver"] = _pkg_version("biovault-beaver") or _pkg_version("beaver")
     info["syftbox_sdk"] = _pkg_version("syftbox-sdk")
     info["python"] = sys.version.split()[0]
@@ -251,13 +251,13 @@ class Session:
     created_at: str = field(default_factory=_iso_now)
     accepted_at: Optional[str] = None
     status: str = "pending"  # pending, active, closed
-    datasets: List[SessionDatasetInfo] = field(default_factory=list)  # Associated datasets
+    datasets: list[SessionDatasetInfo] = field(default_factory=list)  # Associated datasets
 
     # Internal references
     _context: Optional[BeaverContext] = field(default=None, repr=False)
     _local_path: Optional[Path] = field(default=None, repr=False)
     _peer_path: Optional[Path] = field(default=None, repr=False)
-    _datasets_cache: Dict[str, Dataset] = field(default_factory=dict, repr=False)
+    _datasets_cache: dict[str, Dataset] = field(default_factory=dict, repr=False)
 
     @property
     def context(self) -> Optional[BeaverContext]:
@@ -331,7 +331,7 @@ class Session:
         self._datasets_cache[cache_key] = dataset
         return dataset
 
-    def get_datasets(self) -> Dict[str, Dataset]:
+    def get_datasets(self) -> dict[str, Dataset]:
         """
         Get all datasets associated with this session.
 
@@ -359,7 +359,7 @@ class Session:
 
         return result
 
-    def get_twins(self) -> Dict[str, Twin]:
+    def get_twins(self) -> dict[str, Twin]:
         """
         Get all assets from all associated datasets as Twins.
 
@@ -781,8 +781,12 @@ rules:
         backend = (
             self._context._backend if self._context and hasattr(self._context, "_backend") else None
         )
+        # Session state is user's own saved data - use trusted policy by default
+        from .policy import TRUSTED_POLICY
+
+        effective_policy = policy if policy is not None else TRUSTED_POLICY
         obj = runtime.unpack(
-            env, strict=strict, policy=policy, auto_accept=auto_accept, backend=backend
+            env, strict=strict, policy=effective_policy, auto_accept=auto_accept, backend=backend
         )
 
         target_globals = globals_ns
@@ -875,6 +879,7 @@ rules:
         poll_interval: float = 2.0,
         load: bool = True,
         auto_accept: bool = False,
+        trust_loader: bool | None = None,
     ):
         """
         Wait for a remote variable to be published by the peer.
@@ -885,6 +890,9 @@ rules:
             poll_interval: Seconds between checks (default 2)
             load: If True, load and return the value (default True)
             auto_accept: If True, automatically accept computation requests (default False)
+            trust_loader: If True, run loader in trusted mode (full builtins).
+                         If False, use RestrictedPython only (may fail).
+                         If None (default), try RestrictedPython first and prompt on failure.
 
         Returns:
             The loaded value if load=True, otherwise the RemoteVarEntry
@@ -903,15 +911,44 @@ rules:
 
         print(f"⏳ Waiting for '{name}' from {self.peer}...")
 
+        announced = False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
                 peer_vars = self.peer_remote_vars
                 if name in peer_vars:
-                    print(f"📬 '{name}' is now available!")
-                    if load:
-                        return peer_vars[name].load(auto_accept=auto_accept)
-                    return peer_vars[name]
+                    if not announced:
+                        print(f"📬 '{name}' is now available!")
+                        announced = True
+
+                    entry = peer_vars[name]
+                    if not load:
+                        return entry
+
+                    from .remote_vars import NotReady
+
+                    value = entry.load(
+                        inject=False,
+                        auto_accept=auto_accept,
+                        trust_loader=trust_loader,
+                    )
+                    if isinstance(value, NotReady):
+                        # Data exists but isn't locally available yet (sync/decrypt pending).
+                        continue
+
+                    if value is entry:
+                        if getattr(entry, "_last_error", None) is not None:
+                            raise RuntimeError(
+                                f"Remote var '{name}' exists but could not be loaded: {entry._last_error}"
+                            )
+                        # Pointer-only or metadata-only; keep waiting.
+                        continue
+
+                    # Value may legitimately be None (published NoneType); return it.
+                    return value
+            except RuntimeError:
+                # Surface permanent load errors (deserialization policy, schema mismatch, etc.)
+                raise
             except Exception:
                 # Registry might not exist yet or be unreadable
                 pass
@@ -982,11 +1019,15 @@ rules:
                 # Encrypt for the peer who will read this data
                 recipients = [self.peer]
 
+        # Use data/ subdirectory for all beaver files
+        data_dir = self._local_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+
         env = pack(
             obj,
             sender=self.owner,
             name=name,
-            artifact_dir=self._local_path,
+            artifact_dir=data_dir,
             backend=backend,
             recipients=recipients,
         )
@@ -1010,8 +1051,7 @@ rules:
                 "payload_b64": base64.b64encode(env.payload).decode("ascii"),
             }
             content = json.dumps(record, indent=2).encode("utf-8")
-            self._local_path.mkdir(parents=True, exist_ok=True)
-            path = self._local_path / env.filename()
+            path = data_dir / env.filename()
             backend.storage.write_with_shadow(
                 str(path),
                 content,
@@ -1019,8 +1059,8 @@ rules:
                 hint="beaver-envelope",
             )
         else:
-            # Write to our session folder (peer can read it)
-            path = write_envelope(env, out_dir=self._local_path)
+            # Write to our session data folder (peer can read it)
+            path = write_envelope(env, out_dir=data_dir)
         print(f"📤 Sent to session: {path.name}")
 
         return SendResult(path=path, envelope=env)
@@ -1139,7 +1179,7 @@ rules:
 class SessionRequestsView:
     """Pretty-printable view of pending session requests."""
 
-    def __init__(self, requests: List[SessionRequest]):
+    def __init__(self, requests: list[SessionRequest]):
         self.requests = requests
 
     def __len__(self) -> int:

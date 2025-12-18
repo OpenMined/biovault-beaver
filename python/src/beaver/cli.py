@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from . import load, read_envelope, save, snapshot
 
 
-def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Beaver session runner")
     parser.add_argument(
         "--snapshot",
@@ -31,6 +31,11 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Inline Python code to exec before saving (can be repeated).",
     )
     parser.add_argument(
+        "--unsafe-exec",
+        action="store_true",
+        help="ALLOW executing inline code via --apply/--exec (disabled by default for safety).",
+    )
+    parser.add_argument(
         "--save",
         type=Path,
         help="Path to write the resulting snapshot (default: overwrite --snapshot if set)",
@@ -48,9 +53,10 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     args = _parse_args(argv)
     inject = not args.no_inject
+    unsafe = args.unsafe_exec
 
     if args.snapshot:
         load(args.snapshot, inject=inject)
@@ -67,11 +73,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                     f"[debug] Applied file: {p} id={env.envelope_id} name={env.name} type={type(obj).__name__} manifest={env.manifest}"
                 )
         else:
+            if not unsafe:
+                print(f"[error] Inline code execution is disabled. Refused: {item}")
+                return 1
             exec(item, globals())
             if args.debug:
                 print(f"[debug] Executed code: {item}")
 
     for code in args.exec_snippets:
+        if not unsafe:
+            print(f"[error] Inline code execution is disabled. Refused: {code}")
+            return 1
         exec(code, globals())
         if args.debug:
             print(f"[debug] Executed code snippet: {code}")

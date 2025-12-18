@@ -6,7 +6,7 @@ import contextlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 
 @dataclass
@@ -67,7 +67,7 @@ class WorkspaceView:
             context: BeaverContext
         """
         self.context = context
-        self._items: Dict[str, WorkspaceItem] = {}
+        self._items: dict[str, WorkspaceItem] = {}
 
     def refresh(self):
         """Scan and rebuild workspace from inbox, outbox, and remote vars."""

@@ -10,22 +10,56 @@ CONFIG_PATH=""
 
 REQUIREMENTS=(papermill jupyter nbconvert ipykernel scanpy anndata matplotlib scikit-misc pyarrow torch torchvision safetensors)
 
+# Security test mode - for 00-malicious notebooks
+SECURITY_TEST=0
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --interactive) INTERACTIVE=1; shift ;;
         --all) RUN_ALL=1; shift ;;
+        --secure) SECURITY_TEST=1; shift ;;
         *) CONFIG_PATH="$1"; shift ;;
     esac
 done
+
+# Use uv run if python3 not available (e.g., in CI)
+PYTHON_CMD="python3"
+if ! command -v python3 &>/dev/null; then
+    PYTHON_CMD="uv run python"
+fi
+
+# Auto-detect security test mode from config path
+if [[ -n "$CONFIG_PATH" && "$CONFIG_PATH" == *"00-malicious"* ]]; then
+    SECURITY_TEST=1
+fi
+
+# Set environment based on mode
+# BEAVER_TRUSTED_POLICY removed - notebooks must explicitly use trust_loader=True kwarg
+if [[ "$SECURITY_TEST" == "1" ]]; then
+    # Security test mode: auto-accept prompts, but loaders require explicit trust_loader=True
+    export BEAVER_AUTO_ACCEPT="${BEAVER_AUTO_ACCEPT:-1}"
+    echo "Security test mode: Testing human-review security model"
+else
+    # Normal mode: auto-accept prompts, loaders require explicit trust_loader=True
+    export BEAVER_AUTO_ACCEPT="${BEAVER_AUTO_ACCEPT:-1}"
+fi
 
 if [[ "$RUN_ALL" == "1" ]]; then
     echo "=========================================="
     echo "Running ALL notebook tests"
     echo "=========================================="
     OVERALL_RET=0
+    SKIPPED=0
     for config in "$ROOT_DIR"/notebooks/*.json; do
         echo ""
         echo ">>> $config"
+        # Check if test should be skipped
+        if $PYTHON_CMD -c "import json; c=json.load(open('$config')); exit(0 if c.get('skip') else 1)" 2>/dev/null; then
+            SKIP_REASON=$($PYTHON_CMD -c "import json; print(json.load(open('$config')).get('skip_reason', 'marked as skip'))")
+            echo "<<< SKIPPED: $SKIP_REASON"
+            SKIPPED=$((SKIPPED + 1))
+            continue
+        fi
         if "$0" "$config"; then
             echo "<<< PASSED: $config"
         else
@@ -35,9 +69,9 @@ if [[ "$RUN_ALL" == "1" ]]; then
     done
     echo ""
     if [[ "$OVERALL_RET" == "0" ]]; then
-        echo "✓ ALL NOTEBOOK SUITES PASSED"
+        echo "✓ ALL NOTEBOOK SUITES PASSED ($SKIPPED skipped)"
     else
-        echo "✗ SOME NOTEBOOK SUITES FAILED"
+        echo "✗ SOME NOTEBOOK SUITES FAILED ($SKIPPED skipped)"
     fi
     exit "$OVERALL_RET"
 fi
@@ -52,12 +86,6 @@ echo "Config: $CONFIG_PATH"
 echo "=========================================="
 
 mkdir -p "$SANDBOX_ROOT"
-
-# Use uv run if python3 not available (e.g., in CI)
-PYTHON_CMD="python3"
-if ! command -v python3 &>/dev/null; then
-    PYTHON_CMD="uv run python"
-fi
 
 PARSED=$(CONFIG_PATH="$CONFIG_PATH" $PYTHON_CMD - <<'PY'
 import json, os
@@ -176,6 +204,22 @@ done
 for pid in "${PIDS[@]:-}"; do
     [[ -n "$pid" ]] && { wait "$pid" || RET=1; }
 done
+
+# In interactive mode, wait for user to press Ctrl+C
+if [[ "$INTERACTIVE" == "1" ]]; then
+    echo ""
+    echo "=========================================="
+    echo "Jupyter servers running. Open in browser:"
+    for i in "${!ROLES[@]}"; do
+        local_port=$((8888 + i))
+        echo "  [${ROLES[i]}] http://localhost:$local_port"
+    done
+    echo ""
+    echo "Press Ctrl+C to stop all servers..."
+    echo "=========================================="
+    # Wait forever (until Ctrl+C)
+    wait
+fi
 
 echo ""
 [[ "$RET" == "0" ]] && echo "✓ ALL TESTS PASSED" || echo "✗ TESTS FAILED"

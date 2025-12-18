@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 import yaml
 
@@ -18,7 +18,7 @@ class MappingStore:
 
     def __init__(self, path: Path):
         self.path = path
-        self._data: Dict[str, str] = {}
+        self._data: dict[str, str] = {}
         self._loaded = False
 
     @classmethod
@@ -61,7 +61,7 @@ class MappingStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         yaml.safe_dump(self._data, self.path.open("w"))
 
-    def all(self) -> Dict[str, str]:
+    def all(self) -> dict[str, str]:
         self.load()
         return dict(self._data)
 

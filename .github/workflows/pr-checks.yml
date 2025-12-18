@@ -121,3 +121,84 @@ jobs:
 
       - name: Run notebook test
         run: ./test_notebooks.sh notebooks/03-neural-network.json
+
+  macos-intel-3-12:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: |
+          cd python
+          uv sync --extra dev
+
+      - name: Run linting
+        run: bash lint.sh
+
+      - name: Run tests
+        run: bash test.sh
+
+      - name: Run lib-support tests
+        run: bash test_libs.sh
+
+  macos-intel-notebook-01-hello-beaver:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run notebook test
+        run: ./test_notebooks.sh notebooks/01-hello-beaver.json
+
+  macos-intel-notebook-02-advanced-features:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run notebook test
+        run: ./test_notebooks.sh notebooks/02-advanced-features.json
+
+  macos-intel-notebook-03-neural-network:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run notebook test
+        run: ./test_notebooks.sh notebooks/03-neural-network.json

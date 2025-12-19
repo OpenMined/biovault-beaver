@@ -13,6 +13,17 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
+from .syft_url import (
+    build_syft_url,
+    datasites_owner_from_path,
+    datasites_root_from_path,
+    is_syft_url,
+    parse_syft_url,
+    path_to_syft_url,
+    sanitize_syft_path,
+    syft_url_to_local_path,
+)
+
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -44,8 +55,9 @@ def _sanitize_data_location(path_str: str, *, base_dir: Path) -> str:
     This function ensures that:
     1. The path is relative (no absolute paths allowed)
     2. The path doesn't escape the base directory via ..
-    3. The path uses Unix-style separators (normalized internally)
-    4. No null bytes or URL-encoded traversal attempts
+    3. syft:// URLs are normalized and validated against the session base
+    4. The path uses Unix-style separators (normalized internally)
+    5. No null bytes or URL-encoded traversal attempts
 
     Args:
         path_str: The path string to sanitize
@@ -62,6 +74,37 @@ def _sanitize_data_location(path_str: str, *, base_dir: Path) -> str:
 
     if not path_str:
         raise DataLocationSecurityError("data_location cannot be empty")
+
+    if is_syft_url(path_str):
+        try:
+            owner, syft_path = parse_syft_url(path_str)
+            syft_path = sanitize_syft_path(syft_path)
+            normalized = build_syft_url(owner, syft_path)
+        except Exception as exc:
+            raise DataLocationSecurityError(
+                f"data_location must be a valid syft:// URL: {path_str}"
+            ) from exc
+
+        datasites_root = datasites_root_from_path(base_dir)
+        if datasites_root is None:
+            raise DataLocationSecurityError(
+                f"data_location uses syft:// but datasites root not found for base: {base_dir}"
+            )
+
+        base_owner = datasites_owner_from_path(base_dir)
+        if base_owner and base_owner != owner:
+            raise DataLocationSecurityError(
+                f"data_location owner {owner} does not match session owner {base_owner}: {path_str}"
+            )
+
+        data_path = syft_url_to_local_path(normalized, datasites_root=datasites_root)
+        try:
+            data_path.resolve().relative_to(base_dir.resolve())
+        except ValueError:
+            raise DataLocationSecurityError(
+                f"data_location resolves outside base directory: {path_str} -> {data_path}"
+            ) from None
+        return normalized
 
     # Check for null bytes (could truncate path in some systems)
     if "\x00" in path_str:
@@ -139,6 +182,19 @@ def _resolve_data_location(relative_path: str, *, session_dir: Path) -> Path:
     Returns:
         Absolute Path to the data file
     """
+    if is_syft_url(relative_path):
+        datasites_root = datasites_root_from_path(session_dir)
+        if datasites_root is None:
+            raise DataLocationSecurityError(
+                f"syft:// data_location cannot be resolved without datasites root: {relative_path}"
+            )
+        try:
+            return syft_url_to_local_path(relative_path, datasites_root=datasites_root)
+        except Exception as exc:
+            raise DataLocationSecurityError(
+                f"syft:// data_location could not be resolved: {relative_path}"
+            ) from exc
+
     # Normalize to current platform's path separator
     normalized = relative_path.replace("\\", "/")
     parts = normalized.split("/")
@@ -154,6 +210,7 @@ def _make_relative_data_location(absolute_path: Path, *, session_dir: Path) -> s
     Convert an absolute path to a relative data_location string.
 
     Used when writing to remote_vars.json to store only relative paths.
+    If the path is within a SyftBox datasites root, return a syft:// URL.
 
     Args:
         absolute_path: The absolute path to the data file
@@ -164,12 +221,16 @@ def _make_relative_data_location(absolute_path: Path, *, session_dir: Path) -> s
     """
     try:
         relative = absolute_path.resolve().relative_to(session_dir.resolve())
-        # Always use Unix-style separators for cross-platform compatibility
-        return str(relative).replace("\\", "/")
     except ValueError:
         raise DataLocationSecurityError(
             f"Path {absolute_path} is not within session directory {session_dir}"
         ) from None
+
+    syft_url = path_to_syft_url(absolute_path)
+    if syft_url:
+        return syft_url
+    # Always use Unix-style separators for cross-platform compatibility
+    return str(relative).replace("\\", "/")
 
 
 @dataclass(frozen=True)
@@ -1402,15 +1463,16 @@ class RemoteVarPointer:
                 else:
                     session_dir = None
 
-                # Check if data_location is relative (new format) or absolute (legacy)
-                is_relative = not (
+                # Check if data_location is syft://, relative (new format), or absolute (legacy)
+                is_syft = is_syft_url(data_location)
+                is_relative = not is_syft and not (
                     data_location.startswith("/")
                     or re.match(r"^[A-Za-z]:", data_location)
                     or data_location.startswith("\\\\")
                 )
 
-                if is_relative and session_dir:
-                    # New format: relative path - validate and resolve
+                if (is_syft or is_relative) and session_dir:
+                    # New format: syft:// or relative path - validate and resolve
                     try:
                         data_location = _sanitize_data_location(data_location, base_dir=session_dir)
                         data_path = _resolve_data_location(data_location, session_dir=session_dir)

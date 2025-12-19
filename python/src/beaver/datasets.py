@@ -13,6 +13,7 @@ from uuid import uuid4
 import yaml
 
 from .mappings import MappingStore
+from .syft_url import parse_syft_url, path_to_syft_url, sanitize_syft_path
 from .twin import Twin
 
 
@@ -346,10 +347,11 @@ class Dataset:
         suffix = path.suffix.lower()
 
         def loader_src(body: str) -> dict:
+            path_str = path_to_syft_url(path) or str(path)
             return {
                 "_trusted_loader": True,
                 "name": f"dataset_loader{suffix}",
-                "path": str(path),
+                "path": path_str,
                 "deserializer_src": body,
             }
 
@@ -620,10 +622,9 @@ def get(owner: str, name: str) -> Dataset:
 
 
 def _syft_url_to_owner_and_path(url: str, base_dir: Path) -> tuple[str, Path]:
-    if not url.startswith("syft://"):
-        raise ValueError(f"Unsupported URL (expected syft://): {url}")
-    remainder = url[len("syft://") :]
-    if "/" not in remainder:
-        raise ValueError(f"Invalid syft URL: {url}")
-    owner, rest = remainder.split("/", 1)
-    return owner, base_dir / "datasites" / owner / rest
+    try:
+        owner, path = parse_syft_url(url)
+        path = sanitize_syft_path(path)
+    except Exception as exc:
+        raise ValueError(f"Invalid syft URL: {url}") from exc
+    return owner, base_dir / "datasites" / owner / path

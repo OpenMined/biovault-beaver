@@ -391,6 +391,29 @@ def test_data_location_valid_relative_paths():
     assert result == "data/subdir/file.beaver"
 
 
+def test_data_location_syft_urls():
+    """syft:// data_location entries should normalize and stay within the session base."""
+    from beaver.remote_vars import DataLocationSecurityError, _sanitize_data_location
+
+    base = Path("/tmp/datasites/alice@example.com/shared/biovault/sessions/abc123")
+    url = "syft://alice@example.com/shared/biovault/sessions/abc123/data/file.beaver"
+    assert _sanitize_data_location(url, base_dir=base) == url
+
+    # Reject traversal inside syft path
+    with pytest.raises(DataLocationSecurityError):
+        _sanitize_data_location(
+            "syft://alice@example.com/shared/biovault/sessions/abc123/../secrets.bin",
+            base_dir=base,
+        )
+
+    # Reject cross-owner paths
+    with pytest.raises(DataLocationSecurityError):
+        _sanitize_data_location(
+            "syft://bob@example.com/shared/biovault/sessions/abc123/data/file.beaver",
+            base_dir=base,
+        )
+
+
 def test_data_location_resolves_correctly_on_read(tmp_path):
     """When reading, relative data_location should resolve against session dir."""
     from beaver.remote_vars import _resolve_data_location
@@ -402,6 +425,10 @@ def test_data_location_resolves_correctly_on_read(tmp_path):
 
     result = _resolve_data_location(relative, session_dir=session_dir)
     expected = session_dir / "data" / "4c1b51ae.beaver"
+    assert result == expected
+
+    syft_url = "syft://me@example.com/shared/biovault/sessions/abc123/data/4c1b51ae.beaver"
+    result = _resolve_data_location(syft_url, session_dir=session_dir)
     assert result == expected
 
 

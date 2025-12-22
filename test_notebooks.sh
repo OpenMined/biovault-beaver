@@ -10,6 +10,16 @@ CONFIG_PATH=""
 
 REQUIREMENTS=(papermill jupyter nbconvert ipykernel anndata matplotlib scikit-misc pyarrow torch torchvision safetensors)
 
+# Override versions via env vars (e.g., for Intel Mac compatibility)
+if [[ -n "${TORCH_VERSION:-}" ]]; then
+    REQUIREMENTS=("${REQUIREMENTS[@]/torch/torch==$TORCH_VERSION}")
+    echo "Using torch==$TORCH_VERSION from TORCH_VERSION env var"
+fi
+if [[ -n "${NUMPY_SPEC:-}" ]]; then
+    REQUIREMENTS+=("numpy$NUMPY_SPEC")
+    echo "Using numpy$NUMPY_SPEC from NUMPY_SPEC env var"
+fi
+
 # Security test mode - for 00-malicious notebooks
 SECURITY_TEST=0
 
@@ -137,17 +147,19 @@ fi
 uv pip install --quiet -p "$ENV_DIR/bin/python" -e "$ROOT_DIR/python"
 
 # Force install pyfory x86_64 wheel on macOS Intel (universal wheel doesn't work)
-# Also need numpy<2 because torch 2.2.2 (last Intel wheel) doesn't support numpy 2.x
 if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
     echo "Detected macOS Intel - force installing pyfory x86_64 wheel..."
     uv pip uninstall --quiet -p "$ENV_DIR/bin/python" pyfory || true
     uv pip install --quiet -p "$ENV_DIR/bin/python" \
         https://files.pythonhosted.org/packages/35/c5/b2de2a2dc0d2b74002924cdd46a6e6d3bccc5380181ca0dc850855608bfe/pyfory-0.13.2-cp312-cp312-macosx_10_13_x86_64.whl
-    echo "Downgrading numpy<2 for torch 2.2.2 compatibility..."
-    uv pip install --quiet -p "$ENV_DIR/bin/python" "numpy<2"
 fi
 
 PYTHON="$ENV_DIR/bin/python"
+
+# Show installed packages for debugging
+echo "=== Installed packages ==="
+"$PYTHON" -m pip list
+echo "=========================="
 
 SESSION_DIR="$SANDBOX_ROOT/local_session"
 SESSION_ID="test_session_$(date +%s)"

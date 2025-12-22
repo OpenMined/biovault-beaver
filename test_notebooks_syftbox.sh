@@ -19,6 +19,16 @@ DEFAULT_CLIENT2="${CLIENT2_EMAIL:-client2@sandbox.local}"
 
 REQUIREMENTS=(papermill jupyter nbconvert ipykernel scanpy anndata matplotlib scikit-misc pyarrow torch torchvision safetensors)
 
+# Override versions via env vars (e.g., for Intel Mac compatibility)
+if [[ -n "${TORCH_VERSION:-}" ]]; then
+    REQUIREMENTS=("${REQUIREMENTS[@]/torch/torch==$TORCH_VERSION}")
+    echo "Using torch==$TORCH_VERSION from TORCH_VERSION env var"
+fi
+if [[ -n "${NUMPY_SPEC:-}" ]]; then
+    REQUIREMENTS+=("numpy$NUMPY_SPEC")
+    echo "Using numpy$NUMPY_SPEC from NUMPY_SPEC env var"
+fi
+
 usage() {
     cat <<'EOF'
 Usage: ./test_notebooks_syftbox.sh [OPTIONS] <config.json>

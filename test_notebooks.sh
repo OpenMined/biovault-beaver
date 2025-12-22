@@ -12,7 +12,16 @@ REQUIREMENTS=(papermill jupyter nbconvert ipykernel anndata matplotlib scikit-mi
 
 # Override versions via env vars (e.g., for Intel Mac compatibility)
 if [[ -n "${TORCH_VERSION:-}" ]]; then
-    REQUIREMENTS=("${REQUIREMENTS[@]/torch/torch==$TORCH_VERSION}")
+    # Replace torch with pinned version (but not torchvision)
+    NEW_REQS=()
+    for pkg in "${REQUIREMENTS[@]}"; do
+        if [[ "$pkg" == "torch" ]]; then
+            NEW_REQS+=("torch==$TORCH_VERSION")
+        else
+            NEW_REQS+=("$pkg")
+        fi
+    done
+    REQUIREMENTS=("${NEW_REQS[@]}")
     echo "Using torch==$TORCH_VERSION from TORCH_VERSION env var"
 fi
 if [[ -n "${NUMPY_SPEC:-}" ]]; then
@@ -158,7 +167,7 @@ PYTHON="$ENV_DIR/bin/python"
 
 # Show installed packages for debugging
 echo "=== Installed packages ==="
-"$PYTHON" -m pip list
+uv pip list --python "$PYTHON"
 echo "=========================="
 
 SESSION_DIR="$SANDBOX_ROOT/local_session"

@@ -45,7 +45,7 @@ cd "$SCRIPT_DIR/python"
 
 # Show installed packages for debugging
 echo "=== Installed packages ==="
-"$PY_BIN" -m pip list
+uv pip list --python "$PY_BIN"
 echo "=========================="
 
 "$PY_BIN" -m pytest tests/test_lib_support.py -v

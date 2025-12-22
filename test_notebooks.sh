@@ -8,7 +8,7 @@ INTERACTIVE=0
 RUN_ALL=0
 CONFIG_PATH=""
 
-REQUIREMENTS=(papermill jupyter nbconvert ipykernel anndata matplotlib scikit-misc pyarrow torch torchvision safetensors)
+REQUIREMENTS=(papermill jupyter nbconvert ipykernel anndata matplotlib scikit-misc pyarrow torch torchvision safetensors sdv)
 
 # Override versions via env vars (e.g., for Intel Mac compatibility)
 if [[ -n "${TORCH_VERSION:-}" ]]; then
@@ -176,17 +176,30 @@ SESSION_ID="test_session_$(date +%s)"
 setup_session() {
     local email="$1"
     local client_dir="$2"
+    local peer_email="$3"
     mkdir -p "$SESSION_DIR" "$client_dir"
 
     # Create session.json in client dir
     cat > "$client_dir/session.json" <<EOF
 {
     "session_id": "$SESSION_ID",
-    "peer": "$email",
+    "peer": "$peer_email",
     "role": "solo",
     "status": "active"
 }
 EOF
+}
+
+get_peer_email() {
+    local my_email="$1"
+    for e in "${EMAILS[@]}"; do
+        if [[ "$e" != "$my_email" ]]; then
+            echo "$e"
+            return 0
+        fi
+    done
+    # If only one user, peer is self
+    echo "$my_email"
 }
 
 run_notebook() {
@@ -198,10 +211,11 @@ run_notebook() {
     local nb_name="$(basename "$nb_rel")"
     local out_nb="${OUTPUTS[i]}"
     local timeout="${TIMEOUTS[i]}"
+    local peer_email="$(get_peer_email "$email")"
 
     echo ""
-    echo "[$role] Running $nb_name..."
-    setup_session "$email" "$client_dir"
+    echo "[$role] Running $nb_name... (peer=$peer_email)"
+    setup_session "$email" "$client_dir" "$peer_email"
     cp "$ROOT_DIR/$nb_rel" "$client_dir/$nb_name"
     cd "$client_dir"
 

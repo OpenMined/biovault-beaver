@@ -17,7 +17,7 @@ KEEP_ALIVE=0
 DEFAULT_CLIENT1="${CLIENT1_EMAIL:-client1@sandbox.local}"
 DEFAULT_CLIENT2="${CLIENT2_EMAIL:-client2@sandbox.local}"
 
-REQUIREMENTS=(papermill jupyter nbconvert ipykernel scanpy anndata matplotlib scikit-misc pyarrow torch torchvision safetensors)
+REQUIREMENTS=(papermill jupyter nbconvert ipykernel scanpy anndata matplotlib scikit-misc pyarrow torch torchvision safetensors sdv)
 
 # Override versions via env vars (e.g., for Intel Mac compatibility)
 if [[ -n "${TORCH_VERSION:-}" ]]; then

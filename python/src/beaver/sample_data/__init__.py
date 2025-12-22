@@ -5,13 +5,20 @@ from __future__ import annotations
 import sys
 import tempfile
 import types
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
-from urllib.parse import urlparse
+from typing import Any, Optional
 
 import yaml
+
+try:
+    import requests
+
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
 
 DEFAULT_CACHE_DIR = Path.home() / ".biovault" / "cache" / "beaver" / "sample-data"
 
@@ -51,8 +58,7 @@ class DatasetPart:
             return self._manifest
 
         url = _convert_github_url(self.yaml_url)
-        with urllib.request.urlopen(url) as response:
-            self._manifest = yaml.safe_load(response.read().decode("utf-8"))
+        self._manifest = _fetch_with_retry(url, is_yaml=True)
         return self._manifest
 
     def info(self) -> None:
@@ -299,30 +305,123 @@ def _compute_blake3(file_path: Path) -> str:
         return result.stdout.split()[0]
 
 
+def _fetch_with_retry(
+    url: str, is_yaml: bool = False, max_retries: int = 3, base_timeout: int = 60
+) -> Any:
+    """Fetch URL content with exponential backoff retry."""
+    import time
+
+    last_error = None
+    for attempt in range(max_retries):
+        timeout = base_timeout * (attempt + 1)  # Increase timeout each attempt
+        try:
+            if _HAS_REQUESTS:
+                response = requests.get(url, timeout=timeout)
+                response.raise_for_status()
+                if is_yaml:
+                    return yaml.safe_load(response.text)
+                return response.content
+            else:
+                with urllib.request.urlopen(url, timeout=timeout) as response:
+                    content = response.read()
+                    if is_yaml:
+                        return yaml.safe_load(content.decode("utf-8"))
+                    return content
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                wait_time = 2 ** (attempt + 1)  # 2, 4, 8 seconds
+                print(f"  ⚠️  Attempt {attempt + 1} failed: {e}")
+                print(f"  Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+    raise last_error  # type: ignore[misc]
+
+
 def _download_file(url: str, dest_path: Path, desc: str = "Downloading") -> None:
-    """Download file with progress reporting."""
-    print(f"{desc}: {url}")
+    """Download file with progress reporting (uses tqdm if available)."""
+    try:
+        from tqdm import tqdm
 
-    with urllib.request.urlopen(url) as response:
+        _has_tqdm = True
+    except ImportError:
+        _has_tqdm = False
+
+    if _HAS_REQUESTS:
+        response = requests.get(url, stream=True, timeout=180)
+        response.raise_for_status()
         total_size = int(response.headers.get("content-length", 0))
-        downloaded = 0
 
-        with open(dest_path, "wb") as f:
-            while True:
-                chunk = response.read(8192)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
+        if _has_tqdm:
+            with (
+                tqdm(
+                    total=total_size,
+                    unit="B",
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    desc=desc,
+                ) as pbar,
+                open(dest_path, "wb") as f,
+            ):
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        pbar.update(len(chunk))
+        else:
+            print(f"{desc}: {url}")
+            downloaded = 0
+            with open(dest_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            pct = (downloaded / total_size) * 100
+                            print(
+                                f"\r  Progress: {downloaded:,} / {total_size:,} bytes ({pct:.1f}%)",
+                                end="",
+                            )
+            if total_size > 0:
+                print()
+    else:
+        # Fallback to urllib
+        with urllib.request.urlopen(url, timeout=180) as response:
+            total_size = int(response.headers.get("content-length", 0))
 
+            if _has_tqdm:
+                with (
+                    tqdm(
+                        total=total_size,
+                        unit="B",
+                        unit_scale=True,
+                        unit_divisor=1024,
+                        desc=desc,
+                    ) as pbar,
+                    open(dest_path, "wb") as f,
+                ):
+                    while True:
+                        chunk = response.read(8192)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        pbar.update(len(chunk))
+            else:
+                print(f"{desc}: {url}")
+                downloaded = 0
+                with open(dest_path, "wb") as f:
+                    while True:
+                        chunk = response.read(8192)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            pct = (downloaded / total_size) * 100
+                            print(
+                                f"\r  Progress: {downloaded:,} / {total_size:,} bytes ({pct:.1f}%)",
+                                end="",
+                            )
                 if total_size > 0:
-                    pct = (downloaded / total_size) * 100
-                    print(
-                        f"\r  Progress: {downloaded:,} / {total_size:,} bytes ({pct:.1f}%)", end=""
-                    )
-
-        if total_size > 0:
-            print()
+                    print()
 
 
 def _download_from_manifest(
@@ -342,62 +441,78 @@ def _download_from_manifest(
     if verbose:
         print(f"📦 File: {manifest['file']['original']}")
         print(f"   Size: {manifest['file']['original_size_bytes']:,} bytes")
-        print(f"   Shards: {len(manifest['file']['shards'])}")
+
+    shards = manifest["file"].get("shards")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
-
-        # Download shards
-        if verbose:
-            print("\nStep 1: Downloading shards")
-        shard_paths = []
-
-        for i, shard in enumerate(manifest["file"]["shards"]):
-            shard_name = shard["name"]
-            shard_url = base_url + shard_name
-            shard_path = tmpdir_path / shard_name
-
-            if verbose:
-                _download_file(
-                    shard_url, shard_path, f"  Shard {i + 1}/{len(manifest['file']['shards'])}"
-                )
-            else:
-                with urllib.request.urlopen(shard_url) as response:
-                    shard_path.write_bytes(response.read())
-
-            # Verify shard checksum
-            actual_hash = _compute_blake3(shard_path)
-            if actual_hash != shard["b3sum"]:
-                raise ValueError(f"Checksum mismatch for shard {shard_name}")
-            if verbose:
-                print("  ✓ Checksum verified")
-
-            shard_paths.append(shard_path)
-
-        # Combine shards
-        if verbose:
-            print("\nStep 2: Combining shards")
         compressed_path = tmpdir_path / manifest["file"]["compressed"]
 
-        with open(compressed_path, "wb") as outfile:
-            for shard_path in shard_paths:
-                with open(shard_path, "rb") as infile:
-                    while chunk := infile.read(8192):
-                        outfile.write(chunk)
+        if shards:
+            # Sharded download
+            if verbose:
+                print(f"   Shards: {len(shards)}")
+                print("\nStep 1: Downloading shards")
+            shard_paths = []
 
+            for i, shard in enumerate(shards):
+                shard_name = shard["name"]
+                shard_url = base_url + shard_name
+                shard_path = tmpdir_path / shard_name
+
+                if verbose:
+                    _download_file(shard_url, shard_path, f"  Shard {i + 1}/{len(shards)}")
+                else:
+                    if _HAS_REQUESTS:
+                        response = requests.get(shard_url, timeout=180)
+                        response.raise_for_status()
+                        shard_path.write_bytes(response.content)
+                    else:
+                        with urllib.request.urlopen(shard_url, timeout=180) as response:
+                            shard_path.write_bytes(response.read())
+
+                # Verify shard checksum
+                actual_hash = _compute_blake3(shard_path)
+                if actual_hash != shard["b3sum"]:
+                    raise ValueError(f"Checksum mismatch for shard {shard_name}")
+                if verbose:
+                    print("  ✓ Checksum verified")
+
+                shard_paths.append(shard_path)
+
+            # Combine shards
+            if verbose:
+                print("\nStep 2: Combining shards")
+
+            with open(compressed_path, "wb") as outfile:
+                for shard_path in shard_paths:
+                    with open(shard_path, "rb") as infile:
+                        while chunk := infile.read(8192):
+                            outfile.write(chunk)
+
+            if verbose:
+                print(f"  ✓ Combined into {compressed_path.name}")
+        else:
+            # Single file download
+            if verbose:
+                print("\nStep 1: Downloading compressed file")
+
+            compressed_filename = urllib.parse.quote(manifest["file"]["compressed"])
+            compressed_url = base_url + compressed_filename
+            _download_file(compressed_url, compressed_path, "  Downloading")
+
+        # Verify compressed file
         if verbose:
-            print(f"  ✓ Combined into {compressed_path.name}")
-
-        # Verify combined file
+            print("\nStep 2: Verifying checksum" if not shards else "")
         actual_hash = _compute_blake3(compressed_path)
         if actual_hash != manifest["file"]["compressed_b3sum"]:
-            raise ValueError("Checksum mismatch for combined file")
+            raise ValueError("Checksum mismatch for compressed file")
         if verbose:
             print("  ✓ Checksum verified")
 
         # Decompress
         if verbose:
-            print("\nStep 3: Decompressing")
+            print("\nStep 3: Decompressing" if shards else "\nStep 2: Decompressing")
 
         dctx = zstd.ZstdDecompressor()
         with open(compressed_path, "rb") as ifh, open(output_path, "wb") as ofh:
@@ -447,6 +562,24 @@ single_cell = SampleDataset(
     ),
 )
 
+ecg_arrhythmia = SampleDataset(
+    name="ecg_arrhythmia",
+    description="MIT-BIH Arrhythmia ECG dataset (Kaggle)",
+    category="cardiology",
+    real=DatasetPart(
+        name="ecg_arrhythmia",
+        kind="real",
+        yaml_url=(
+            f"{BASE_URL}/kaggle/ecg-arrhythmia-classification-dataset/"
+            "MIT-BIH%20Arrhythmia%20Database.csv.yaml"
+        ),
+        description="MIT-BIH Arrhythmia Database (CSV)",
+        size_bytes=45482621,
+        compressed_size_bytes=15576743,
+        file_format="csv",
+    ),
+)
+
 _HELP_TEXT = """beaver.sample_data - Download and use example datasets
 
 List available datasets:
@@ -454,7 +587,9 @@ List available datasets:
 
 Get a dataset:
     ds = sample_data.single_cell
+    ds = sample_data.ecg_arrhythmia
     ds = sample_data.get('single_cell')
+    ds = sample_data.get('ecg_arrhythmia')
 
 Download data:
     ds.mock.download()       # Download mock data only
@@ -473,7 +608,7 @@ Cache location: ~/.biovault/cache/beaver/sample-data/
 
 def list_datasets() -> list[str]:
     """List all available sample datasets."""
-    return ["single_cell"]
+    return ["single_cell", "ecg_arrhythmia"]
 
 
 def help() -> None:
@@ -485,6 +620,7 @@ def get(name: str) -> SampleDataset:
     """Get a sample dataset by name."""
     datasets = {
         "single_cell": single_cell,
+        "ecg_arrhythmia": ecg_arrhythmia,
     }
     if name not in datasets:
         available = ", ".join(datasets.keys())
@@ -494,6 +630,7 @@ def get(name: str) -> SampleDataset:
 
 __all__ = [
     "single_cell",
+    "ecg_arrhythmia",
     "list_datasets",
     "get",
     "help",

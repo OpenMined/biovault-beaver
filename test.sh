@@ -34,7 +34,7 @@ fi
 
 # Show installed packages for debugging
 echo "=== Installed packages ==="
-.venv/bin/pip list
+uv pip list
 echo "=========================="
 
 # Use venv python directly to avoid uv run re-syncing deps

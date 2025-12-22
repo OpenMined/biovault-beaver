@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
     "pyyaml>=6.0",
     "pyfory==0.13.2",
+    "numpy",
     "RestrictedPython>=8.0",
     "zstandard>=0.20.0",
     "syftbox-sdk>=0.1.10",

@@ -17,7 +17,26 @@ KEEP_ALIVE=0
 DEFAULT_CLIENT1="${CLIENT1_EMAIL:-client1@sandbox.local}"
 DEFAULT_CLIENT2="${CLIENT2_EMAIL:-client2@sandbox.local}"
 
-REQUIREMENTS=(papermill jupyter nbconvert ipykernel scanpy anndata matplotlib scikit-misc pyarrow torch torchvision safetensors)
+REQUIREMENTS=(papermill jupyter nbconvert ipykernel scanpy anndata matplotlib scikit-misc pyarrow torch torchvision safetensors sdv)
+
+# Override versions via env vars (e.g., for Intel Mac compatibility)
+if [[ -n "${TORCH_VERSION:-}" ]]; then
+    # Replace torch with pinned version (but not torchvision)
+    NEW_REQS=()
+    for pkg in "${REQUIREMENTS[@]}"; do
+        if [[ "$pkg" == "torch" ]]; then
+            NEW_REQS+=("torch==$TORCH_VERSION")
+        else
+            NEW_REQS+=("$pkg")
+        fi
+    done
+    REQUIREMENTS=("${NEW_REQS[@]}")
+    echo "Using torch==$TORCH_VERSION from TORCH_VERSION env var"
+fi
+if [[ -n "${NUMPY_SPEC:-}" ]]; then
+    REQUIREMENTS+=("numpy$NUMPY_SPEC")
+    echo "Using numpy$NUMPY_SPEC from NUMPY_SPEC env var"
+fi
 
 usage() {
     cat <<'EOF'

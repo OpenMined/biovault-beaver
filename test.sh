@@ -32,5 +32,10 @@ if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
     echo "=== End pyfory fix ==="
 fi
 
+# Show installed packages for debugging
+echo "=== Installed packages ==="
+uv pip list
+echo "=========================="
+
 # Use venv python directly to avoid uv run re-syncing deps
 .venv/bin/python -m pytest -v

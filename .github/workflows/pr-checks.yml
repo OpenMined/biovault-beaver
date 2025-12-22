@@ -143,6 +143,9 @@ jobs:
           enable-cache: true
 
       - name: Run notebook test
+        env:
+          TORCH_VERSION: "2.2.2"
+          NUMPY_SPEC: "<2"
         run: ./test_notebooks.sh notebooks/03-neural-network.json
 
   notebook-00-malicious:
@@ -188,6 +191,9 @@ jobs:
         run: bash test.sh
 
       - name: Run lib-support tests
+        env:
+          TORCH_VERSION: "2.2.2"
+          NUMPY_SPEC: "<2"
         run: bash test_libs.sh
 
   macos-intel-notebook-01-hello-beaver:
@@ -206,6 +212,9 @@ jobs:
           enable-cache: true
 
       - name: Run notebook test
+        env:
+          TORCH_VERSION: "2.2.2"
+          NUMPY_SPEC: "<2"
         run: ./test_notebooks.sh notebooks/01-hello-beaver.json
 
   macos-intel-notebook-02-advanced-features:
@@ -224,6 +233,9 @@ jobs:
           enable-cache: true
 
       - name: Run notebook test
+        env:
+          TORCH_VERSION: "2.2.2"
+          NUMPY_SPEC: "<2"
         run: ./test_notebooks.sh notebooks/02-advanced-features.json
 
   macos-intel-notebook-03-neural-network:
@@ -242,6 +254,9 @@ jobs:
           enable-cache: true
 
       - name: Run notebook test
+        env:
+          TORCH_VERSION: "2.2.2"
+          NUMPY_SPEC: "<2"
         run: ./test_notebooks.sh notebooks/03-neural-network.json
 
   # SyftBox stack integration tests (real server + syncing clients)
@@ -321,6 +336,9 @@ jobs:
           enable-cache: true
 
       - name: Run syftbox notebook test
+        env:
+          TORCH_VERSION: "2.2.2"
+          NUMPY_SPEC: "<2"
         run: ./test_notebooks_syftbox.sh notebooks/03-neural-network.json
 
   syftbox-notebook-00-malicious:

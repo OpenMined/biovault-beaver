@@ -58,8 +58,10 @@ def __getattr__(name: str):
     environments and tests can control optional deps.
     """
     if name == "sample_data":
-        from . import sample_data as _sample_data  # noqa: PLC0415
+        import importlib  # noqa: PLC0415
 
+        _sample_data = importlib.import_module("beaver.sample_data")
+        globals()["sample_data"] = _sample_data  # Cache to avoid re-import
         return _sample_data
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 

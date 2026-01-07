@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SANDBOX_ROOT="$ROOT_DIR/sandbox"
 ENV_DIR="$ROOT_DIR/.test-notebooks"
-SYFTBOX_DIR="$ROOT_DIR/syftbox-sdk/syftbox"
+SYFTBOX_DIR="$ROOT_DIR/syftbox"
 GO_CACHE_DIR="$SYFTBOX_DIR/.gocache"
 
 INTERACTIVE=0

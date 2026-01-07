@@ -72,3 +72,6 @@ examples/**/.nextflow*
 sandbox/**
 .venv*/*
 notebooks/old/single_cell/data/*
+# Workspace symlinks (created by repo tool)
+/syftbox-sdk
+/syftbox

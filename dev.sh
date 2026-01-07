@@ -20,7 +20,7 @@ EOF
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SYFTBOX_DIR="$ROOT_DIR/syftbox-sdk/syftbox"
+SYFTBOX_DIR="$ROOT_DIR/syftbox"
 SANDBOX_DIR="${SANDBOX_DIR:-$ROOT_DIR/sandbox}"
 PACKAGE_DIR="$ROOT_DIR/python"
 SYFTBOX_SDK_WHEEL_DIR="$ROOT_DIR/syftbox-sdk/python/target/wheels"

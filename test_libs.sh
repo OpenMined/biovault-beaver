@@ -10,13 +10,19 @@ PY_BIN="$VENV_PATH/bin/python"
 uv venv "$VENV_PATH"
 uv pip install --python "$PY_BIN" -e "$SCRIPT_DIR/python[dev,lib-support]"
 
+# Override versions via env vars (e.g., for Intel Mac compatibility)
+if [[ -n "${TORCH_VERSION:-}" ]]; then
+    echo "Using torch==$TORCH_VERSION from TORCH_VERSION env var"
+    uv pip install --python "$PY_BIN" "torch==$TORCH_VERSION"
+fi
+if [[ -n "${NUMPY_SPEC:-}" ]]; then
+    echo "Using numpy$NUMPY_SPEC from NUMPY_SPEC env var"
+    uv pip install --python "$PY_BIN" "numpy$NUMPY_SPEC"
+fi
+
 # Force install pyfory x86_64 wheel on macOS Intel (universal wheel doesn't work)
-# Also need numpy<2 because torch 2.2.2 (last Intel wheel) doesn't support numpy 2.x
 if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
     echo "=== macOS Intel detected ==="
-
-    echo "Downgrading numpy<2 for torch 2.2.2 compatibility..."
-    uv pip install --python "$PY_BIN" "numpy<2"
 
     echo "Before pyfory fix:"
     uv pip show --python "$PY_BIN" pyfory || echo "pyfory not installed"
@@ -36,4 +42,10 @@ if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
 fi
 
 cd "$SCRIPT_DIR/python"
+
+# Show installed packages for debugging
+echo "=== Installed packages ==="
+uv pip list --python "$PY_BIN"
+echo "=========================="
+
 "$PY_BIN" -m pytest tests/test_lib_support.py -v

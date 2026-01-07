@@ -634,7 +634,14 @@ def _prepare_for_sending(
         backend: Optional SyftBoxBackend for encrypted writes
         recipients: Optional list of recipient emails for encryption
     """
+    from .syft_url import path_to_syft_url
     from .twin import Twin
+
+    def _path_for_loader(path: Path, base_dir: Optional[Path]) -> str:
+        syft_url = path_to_syft_url(path)
+        if syft_url:
+            return syft_url
+        return _relative_posix_path(path, base_dir) or path.name
 
     def _write_artifact_encrypted(serializer, obj_to_write, path, backend, recipients):
         """Write artifact using TrustedLoader serializer, optionally encrypting.
@@ -687,7 +694,7 @@ def _prepare_for_sending(
         src_clean = textwrap.dedent(src_clean)
         base_dir = _trusted_loader_base_dir(artifact_dir, backend)
         # Prefer relative unix-style paths; avoid embedding OS absolute paths in payloads.
-        path_for_loader = _relative_posix_path(path, base_dir) or path.name
+        path_for_loader = _path_for_loader(path, base_dir)
         result = {
             "_trusted_loader": True,
             "name": tl["name"],
@@ -735,7 +742,7 @@ def _prepare_for_sending(
             )
             src_clean = textwrap.dedent(src_clean)
             base_dir = _trusted_loader_base_dir(artifact_dir, backend)
-            path_for_loader = _relative_posix_path(path, base_dir) or path.name
+            path_for_loader = _path_for_loader(path, base_dir)
             public_obj = {
                 "_trusted_loader": True,
                 "name": tl_pub["name"],
@@ -769,7 +776,7 @@ def _prepare_for_sending(
                 )
                 src_clean = textwrap.dedent(src_clean)
                 base_dir = _trusted_loader_base_dir(artifact_dir, backend)
-                path_for_loader = _relative_posix_path(path, base_dir) or path.name
+                path_for_loader = _path_for_loader(path, base_dir)
                 private_obj = {
                     "_trusted_loader": True,
                     "name": tl_priv["name"],
@@ -1313,6 +1320,29 @@ def _resolve_trusted_loader(
         backend_data_dir = None
         if backend is not None and getattr(backend, "data_dir", None) is not None:
             backend_data_dir = Path(backend.data_dir).resolve()
+
+        # Resolve syft:// URLs to local datasites paths
+        if data_path:
+            from .syft_url import datasites_root_from_path, is_syft_url, syft_url_to_local_path
+
+            if is_syft_url(data_path):
+                datasites_root = None
+                if backend_data_dir is not None:
+                    datasites_root = backend_data_dir / "datasites"
+                elif envelope_path is not None:
+                    datasites_root = datasites_root_from_path(Path(envelope_path))
+                if datasites_root is None:
+                    raise SecurityError(
+                        f"Cannot resolve syft:// path without datasites root: {data_path}"
+                    )
+                try:
+                    data_path = str(
+                        syft_url_to_local_path(data_path, datasites_root=datasites_root)
+                    )
+                except Exception as exc:
+                    raise SecurityError(
+                        f"Invalid syft:// path in trusted loader: {data_path}"
+                    ) from exc
 
         # Translate path from sender's perspective to local view
         # If path contains /datasites/<identity>/, map to our local view

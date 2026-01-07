@@ -8,7 +8,26 @@ INTERACTIVE=0
 RUN_ALL=0
 CONFIG_PATH=""
 
-REQUIREMENTS=(papermill jupyter nbconvert ipykernel anndata matplotlib scikit-misc pyarrow torch torchvision safetensors)
+REQUIREMENTS=(papermill jupyter nbconvert ipykernel anndata matplotlib scikit-misc pyarrow torch torchvision safetensors sdv)
+
+# Override versions via env vars (e.g., for Intel Mac compatibility)
+if [[ -n "${TORCH_VERSION:-}" ]]; then
+    # Replace torch with pinned version (but not torchvision)
+    NEW_REQS=()
+    for pkg in "${REQUIREMENTS[@]}"; do
+        if [[ "$pkg" == "torch" ]]; then
+            NEW_REQS+=("torch==$TORCH_VERSION")
+        else
+            NEW_REQS+=("$pkg")
+        fi
+    done
+    REQUIREMENTS=("${NEW_REQS[@]}")
+    echo "Using torch==$TORCH_VERSION from TORCH_VERSION env var"
+fi
+if [[ -n "${NUMPY_SPEC:-}" ]]; then
+    REQUIREMENTS+=("numpy$NUMPY_SPEC")
+    echo "Using numpy$NUMPY_SPEC from NUMPY_SPEC env var"
+fi
 
 # Security test mode - for 00-malicious notebooks
 SECURITY_TEST=0
@@ -137,17 +156,19 @@ fi
 uv pip install --quiet -p "$ENV_DIR/bin/python" -e "$ROOT_DIR/python"
 
 # Force install pyfory x86_64 wheel on macOS Intel (universal wheel doesn't work)
-# Also need numpy<2 because torch 2.2.2 (last Intel wheel) doesn't support numpy 2.x
 if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
     echo "Detected macOS Intel - force installing pyfory x86_64 wheel..."
     uv pip uninstall --quiet -p "$ENV_DIR/bin/python" pyfory || true
     uv pip install --quiet -p "$ENV_DIR/bin/python" \
         https://files.pythonhosted.org/packages/35/c5/b2de2a2dc0d2b74002924cdd46a6e6d3bccc5380181ca0dc850855608bfe/pyfory-0.13.2-cp312-cp312-macosx_10_13_x86_64.whl
-    echo "Downgrading numpy<2 for torch 2.2.2 compatibility..."
-    uv pip install --quiet -p "$ENV_DIR/bin/python" "numpy<2"
 fi
 
 PYTHON="$ENV_DIR/bin/python"
+
+# Show installed packages for debugging
+echo "=== Installed packages ==="
+uv pip list --python "$PYTHON"
+echo "=========================="
 
 SESSION_DIR="$SANDBOX_ROOT/local_session"
 SESSION_ID="test_session_$(date +%s)"
@@ -155,17 +176,30 @@ SESSION_ID="test_session_$(date +%s)"
 setup_session() {
     local email="$1"
     local client_dir="$2"
+    local peer_email="$3"
     mkdir -p "$SESSION_DIR" "$client_dir"
 
     # Create session.json in client dir
     cat > "$client_dir/session.json" <<EOF
 {
     "session_id": "$SESSION_ID",
-    "peer": "$email",
+    "peer": "$peer_email",
     "role": "solo",
     "status": "active"
 }
 EOF
+}
+
+get_peer_email() {
+    local my_email="$1"
+    for e in "${EMAILS[@]}"; do
+        if [[ "$e" != "$my_email" ]]; then
+            echo "$e"
+            return 0
+        fi
+    done
+    # If only one user, peer is self
+    echo "$my_email"
 }
 
 run_notebook() {
@@ -177,10 +211,11 @@ run_notebook() {
     local nb_name="$(basename "$nb_rel")"
     local out_nb="${OUTPUTS[i]}"
     local timeout="${TIMEOUTS[i]}"
+    local peer_email="$(get_peer_email "$email")"
 
     echo ""
-    echo "[$role] Running $nb_name..."
-    setup_session "$email" "$client_dir"
+    echo "[$role] Running $nb_name... (peer=$peer_email)"
+    setup_session "$email" "$client_dir" "$peer_email"
     cp "$ROOT_DIR/$nb_rel" "$client_dir/$nb_name"
     cd "$client_dir"
 

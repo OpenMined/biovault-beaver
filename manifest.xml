@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<manifest>
+  <remote name="github" fetch="git@github.com:" />
+  <default remote="github" revision="main" />
+  <project name="OpenMined/syftbox-sdk" path="syftbox-sdk" revision="main" />
+  <project name="OpenMined/syftbox" path="syftbox" revision="madhava/biovault" />
+</manifest>

@@ -273,8 +273,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: syftbox-sdk/syftbox/go.mod
-          cache-dependency-path: syftbox-sdk/syftbox/go.sum
+          go-version-file: syftbox/go.mod
+          cache-dependency-path: syftbox/go.sum
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -302,8 +302,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: syftbox-sdk/syftbox/go.mod
-          cache-dependency-path: syftbox-sdk/syftbox/go.sum
+          go-version-file: syftbox/go.mod
+          cache-dependency-path: syftbox/go.sum
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -331,8 +331,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: syftbox-sdk/syftbox/go.mod
-          cache-dependency-path: syftbox-sdk/syftbox/go.sum
+          go-version-file: syftbox/go.mod
+          cache-dependency-path: syftbox/go.sum
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -363,8 +363,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: syftbox-sdk/syftbox/go.mod
-          cache-dependency-path: syftbox-sdk/syftbox/go.sum
+          go-version-file: syftbox/go.mod
+          cache-dependency-path: syftbox/go.sum
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -392,8 +392,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: syftbox-sdk/syftbox/go.mod
-          cache-dependency-path: syftbox-sdk/syftbox/go.sum
+          go-version-file: syftbox/go.mod
+          cache-dependency-path: syftbox/go.sum
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5

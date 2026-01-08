@@ -28,6 +28,14 @@ source .venv/bin/activate
 uv pip install -e ./python --quiet 2>/dev/null
 uv pip install pytest ruff mypy vulture --quiet 2>/dev/null
 
+# Fix pyfory on macOS Intel (universal wheel doesn't work)
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
+  uv pip uninstall pyfory --quiet 2>/dev/null || true
+  uv pip install --quiet \
+    https://files.pythonhosted.org/packages/35/c5/b2de2a2dc0d2b74002924cdd46a6e6d3bccc5380181ca0dc850855608bfe/pyfory-0.13.2-cp312-cp312-macosx_10_13_x86_64.whl \
+    2>/dev/null || true
+fi
+
 cd "$ROOT_DIR/python"
 
 TMPDIR_LINT=$(mktemp -d)

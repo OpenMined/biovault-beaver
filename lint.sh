@@ -23,10 +23,10 @@ for arg in "$@"; do
 done
 
 # Setup venv (must be sequential)
-export UV_VENV_CLEAR=1
-uv venv > /dev/null 2>&1
-uv pip install -e ./python > /dev/null 2>&1
-uv pip install pytest ruff mypy vulture > /dev/null 2>&1
+uv venv --quiet 2>/dev/null || true
+source .venv/bin/activate
+uv pip install -e ./python --quiet 2>/dev/null
+uv pip install pytest ruff mypy vulture --quiet 2>/dev/null
 
 cd "$ROOT_DIR/python"
 
@@ -70,18 +70,18 @@ wait_all() {
 }
 
 if [[ "$CHECK_MODE" -eq 1 ]]; then
-  run_task "ruff-format" uv run ruff format . --check
-  run_task "ruff-check" uv run ruff check .
+  run_task "ruff-format" ruff format . --check
+  run_task "ruff-check" ruff check .
 else
-  run_task "ruff-format" uv run ruff format .
-  run_task "ruff-check" uv run ruff check . --fix
+  run_task "ruff-format" ruff format .
+  run_task "ruff-check" ruff check . --fix
 fi
 
-run_task "mypy" uv run mypy src/beaver
-run_task "vulture" uv run vulture src --min-confidence 80
+run_task "mypy" mypy src/beaver
+run_task "vulture" vulture src --min-confidence 80
 
 if [[ "$RUN_TESTS" -eq 1 ]]; then
-  run_task "pytest" uv run pytest
+  run_task "pytest" pytest
 fi
 
 wait_all

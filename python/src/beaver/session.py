@@ -701,6 +701,7 @@ rules:
         """
         from . import runtime
 
+        runtime._ensure_pyfory()
         target = Path(path) if path is not None else self._default_state_path()
         target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -912,6 +913,7 @@ rules:
         print(f"⏳ Waiting for '{name}' from {self.peer}...")
 
         announced = False
+        cached_entry = None  # Cache entry to preserve _last_error across iterations
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -921,7 +923,11 @@ rules:
                         print(f"📬 '{name}' is now available!")
                         announced = True
 
-                    entry = peer_vars[name]
+                    # Use cached entry if available to preserve _last_error state
+                    if cached_entry is None:
+                        cached_entry = peer_vars[name]
+                    entry = cached_entry
+
                     if not load:
                         return entry
 

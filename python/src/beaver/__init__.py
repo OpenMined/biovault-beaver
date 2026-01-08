@@ -174,10 +174,13 @@ def dev() -> None:
 
 # Enable matplotlib inline mode by default in Jupyter/IPython.
 # Avoid importing IPython in non-interactive scripts (it can trigger heavy imports).
+# Set BEAVER_DISABLE_MPL_INLINE=1 to skip auto-enable.
 try:
+    import os
     import sys
 
-    if "IPython" in sys.modules:
+    disable_inline = os.environ.get("BEAVER_DISABLE_MPL_INLINE", "").strip().lower()
+    if disable_inline not in ("1", "true", "yes", "on") and "IPython" in sys.modules:
         from IPython import get_ipython  # type: ignore
 
         ip = get_ipython()

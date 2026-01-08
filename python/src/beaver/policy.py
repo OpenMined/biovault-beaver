@@ -133,6 +133,38 @@ class BeaverPolicy:
 
         return func
 
+    def validate_method(
+        self, method: Callable, is_local: bool = False, **_kwargs
+    ) -> Optional[Callable]:
+        """
+        Called before deserializing a bound method.
+
+        Args:
+            method: The method about to be loaded
+            is_local: Whether this method belongs to a locally defined class
+        """
+        return self.validate_function(method, is_local=is_local)
+
+    def validate_module(self, module_name: str, **_kwargs) -> Optional[object]:
+        """
+        Called before accepting a module reference during deserialization.
+
+        Args:
+            module_name: Module name to validate (e.g., 'os', 'numpy.linalg')
+        """
+        self._log(
+            "info",
+            "Validating module",
+            module=module_name,
+        )
+
+        for blocked in self.block_modules:
+            if module_name.startswith(blocked):
+                self._log("warning", f"BLOCKED: Module {module_name} is in blocklist")
+                raise ValueError(f"Blocked module: {module_name}")
+
+        return None
+
     def validate_reduce(self, func: Callable, args: tuple) -> tuple:
         """
         Called before calling __reduce__ during deserialization.

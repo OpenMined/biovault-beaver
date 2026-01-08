@@ -114,6 +114,10 @@ def _check_missing_imports(func: Callable) -> list[str]:
             pkg_name = package_map.get(module_name, module_name)
             if pkg_name not in missing:
                 missing.append(pkg_name)
+        except Exception:
+            # Other exceptions (e.g., runtime errors during import) mean package exists
+            # but has issues - don't flag as missing
+            pass
 
     return missing
 
@@ -148,6 +152,9 @@ def _check_missing_imports_with_versions(
             version = required_versions.get(module_name) if required_versions else None
             if not any(p[0] == pkg_name for p in missing):
                 missing.append((pkg_name, version))
+        except Exception:
+            # Other exceptions (e.g., runtime errors during import) mean package exists
+            pass
 
     return missing
 
@@ -224,6 +231,13 @@ def _prompt_install_function_deps(
         print("💡 To install manually, run:")
         print(f"   {pip_cmd} {deps_str}")
         return False
+    except Exception as e:
+        # Handle non-interactive environments (e.g., papermill, StdinNotImplementedError)
+        if "stdin" in str(type(e).__name__).lower() or "stdin" in str(e).lower():
+            print("💡 Non-interactive environment detected. To install manually, run:")
+            print(f"   {pip_cmd} {deps_str}")
+            return False
+        raise
 
     if response in ("y", "yes"):
         print(f"\n📦 Installing {deps_str}...")
@@ -648,10 +662,13 @@ class ComputationResult:
             else:
                 raise ValueError("Twin has no private data to approve")
         else:
+            # Handle ellipsis defaults for non-Twin results
+            actual_stdout = None if stdout is ... else stdout
+            actual_stderr = None if stderr is ... else stderr
             return self._send_result(
                 self.result,
-                stdout=stdout,
-                stderr=stderr,
+                stdout=actual_stdout,
+                stderr=actual_stderr,
                 include_output=include_output,
             )
 

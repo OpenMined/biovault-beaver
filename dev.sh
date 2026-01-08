@@ -123,6 +123,22 @@ declare -a CLIENT_VENVS_EMAILS=()
 declare -a CLIENT_VENVS_PATHS=()
 STACK_STARTED=0
 
+# Shared session ID for all clients
+SESSION_ID="dev_session_$(date +%s)"
+
+# Get peer email for a given client (returns the other client)
+get_peer_email() {
+  local my_email="$1"
+  for e in "${CLIENTS[@]}"; do
+    if [[ "$e" != "$my_email" ]]; then
+      echo "$e"
+      return 0
+    fi
+  done
+  # If only one client, peer is self
+  echo "$my_email"
+}
+
 find_free_port() {
   local port
   while true; do
@@ -288,17 +304,24 @@ provision_client_identity() {
   local email="$1"
   local data_dir="$2"
   local venv_python="$3"
+  local vault_path="$data_dir/.syc"
 
   echo "[$email] Provisioning SyftBox identity..."
-  "$venv_python" - "$email" "$data_dir" <<'PY'
+  "$venv_python" - "$email" "$data_dir" "$vault_path" <<'PY'
 import sys
 
 email = sys.argv[1]
 data_dir = sys.argv[2]
+vault_path = sys.argv[3]
 
 import syftbox_sdk as syft
 
-result = syft.provision_identity(email, data_dir)
+# Use keyword args with explicit vault_override to match test_notebooks_syftbox behavior
+result = syft.provision_identity(
+    identity=email,
+    data_root=data_dir,
+    vault_override=vault_path,
+)
 if result.generated:
     print(f"  Generated identity for {email}")
 else:
@@ -353,6 +376,19 @@ prepare_client_workspace() {
 
   write_permissions "$email" "$self_root/shared/syft.pub.yaml"
 
+  # Create session.json for shared session between clients
+  local peer_email
+  peer_email="$(get_peer_email "$email")"
+  cat > "$client_home/session.json" <<EOF
+{
+    "session_id": "$SESSION_ID",
+    "peer": "$peer_email",
+    "role": "partner",
+    "status": "active"
+}
+EOF
+  echo "[$email] Created session.json (peer=$peer_email, session=$SESSION_ID)"
+
   # Symlink notebooks based on client role
   if [[ "$email" == "client1@sandbox.local" ]]; then
     while IFS= read -r nb || [[ -n "$nb" ]]; do
@@ -373,21 +409,48 @@ prepare_client_workspace() {
     ln -snf "$notebooks_dir/single_cell" "$client_home/single_cell"
   fi
 
+  # Symlink entire notebooks folder for easy access
+  ln -snf "$notebooks_dir" "$client_home/notebooks"
+
   # Track venv for bundle imports
   CLIENT_VENVS_EMAILS+=("$email")
   CLIENT_VENVS_PATHS+=("$venv_path/bin/python")
 
-  if [[ ! -f "$venv_path/bin/python" ]]; then
-    echo "[$email] Creating virtual environment..."
-    uv venv "$venv_path"
-  fi
+  echo "[$email] Creating virtual environment (Python 3.12)..."
+  uv venv -p 3.12 "$venv_path"
 
   echo "[$email] Installing Python dependencies..."
-  uv pip install -p "$venv_path/bin/python" -U jupyter pytest
+  uv pip install -p "$venv_path/bin/python" -U jupyter pytest ipykernel
   uv pip install -p "$venv_path/bin/python" -e "$PACKAGE_DIR"
   if [[ -n "$wheel" && -f "$wheel" ]]; then
     uv pip install -p "$venv_path/bin/python" --force-reinstall "$wheel"
   fi
+
+  # Create kernel spec with correct environment
+  local kernel_name="${email%%@*}"  # e.g., "client1" from "client1@sandbox.local"
+  local kernel_dir="$client_home/.local/share/jupyter/kernels/$kernel_name"
+  echo "[$email] Creating Jupyter kernel '$kernel_name'..."
+  mkdir -p "$kernel_dir"
+  cat > "$kernel_dir/kernel.json" <<KERNEL
+{
+  "argv": ["$venv_path/bin/python", "-m", "ipykernel_launcher", "-f", "{connection_file}"],
+  "display_name": "Python ($kernel_name)",
+  "language": "python",
+  "env": {
+    "PATH": "$venv_path/bin:\${PATH}",
+    "VIRTUAL_ENV": "$venv_path",
+    "SYFTBOX_EMAIL": "$email",
+    "SYFTBOX_DATA_DIR": "$client_home",
+    "SYFTBOX_CONFIG_PATH": "$config_path",
+    "SYFTBOX_SERVER_URL": "$SERVER_URL",
+    "SYC_VAULT": "$client_home/.syc",
+    "BEAVER_SESSION_ID": "$SESSION_ID",
+    "BEAVER_USER": "$email",
+    "BEAVER_PEER": "$peer_email",
+    "BEAVER_AUTO_ACCEPT": "1"
+  }
+}
+KERNEL
 
   provision_client_identity "$email" "$client_home" "$venv_path/bin/python"
 }
@@ -421,6 +484,10 @@ start_jupyter() {
   local email="$1"
   local client_home="$SANDBOX_DIR/$email"
   local venv_path="$client_home/.venv"
+  local config_path="$client_home/.syftbox/config.json"
+  local vault_path="$client_home/.syc"
+  local peer_email
+  peer_email="$(get_peer_email "$email")"
   local port
   port="$(find_free_port)"
 
@@ -431,7 +498,24 @@ start_jupyter() {
 
   (
     cd "$client_home"
-    exec "$venv_path/bin/jupyter" lab \
+    # Activate the venv so jupyter and python are in PATH
+    source "$venv_path/bin/activate"
+
+    # Set SyftBox environment variables for proper backend integration
+    export SYFTBOX_EMAIL="$email"
+    export SYFTBOX_DATA_DIR="$client_home"
+    export SYFTBOX_CONFIG_PATH="$config_path"
+    export SYFTBOX_SERVER_URL="$SERVER_URL"
+    export SYC_VAULT="$vault_path"
+    # Beaver session environment for shared sessions
+    export BEAVER_AUTO_ACCEPT="${BEAVER_AUTO_ACCEPT:-1}"
+    export BEAVER_SESSION_ID="$SESSION_ID"
+    export BEAVER_USER="$email"
+    export BEAVER_PEER="$peer_email"
+    # Tell Jupyter to find kernels in client's local dir
+    export JUPYTER_DATA_DIR="$client_home/.local/share/jupyter"
+
+    exec jupyter lab \
       --no-browser \
       --ServerApp.ip=127.0.0.1 \
       --ServerApp.allow_remote_access=False \

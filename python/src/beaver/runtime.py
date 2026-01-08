@@ -4,6 +4,7 @@ import base64
 import collections.abc
 import contextlib
 import functools
+import importlib
 import inspect
 import json
 import os
@@ -22,46 +23,58 @@ from . import lib_support
 from .envelope import BeaverEnvelope
 from .policy import DEFAULT_POLICY, TRUSTED_POLICY, BeaverPolicy
 
-try:
-    import pyfory
-except ImportError as e:
-    raise ImportError(
-        "pyfory is required for beaver serialization; pickle fallback is disabled for security."
-    ) from e
+pyfory = None
+DataClassSerializer = None  # type: ignore[assignment]
+_LenientDataClassSerializer = None
+
+
+def _ensure_pyfory():
+    global pyfory, DataClassSerializer, _LenientDataClassSerializer
+    if pyfory is not None:
+        return pyfory
+    try:
+        import pyfory as _pyfory
+    except ImportError as e:  # pragma: no cover - only raised when missing dependency
+        raise ImportError(
+            "pyfory is required for beaver serialization; pickle fallback is disabled for security."
+        ) from e
+    pyfory = _pyfory
+    try:  # pragma: no cover
+        serializer = importlib.import_module("pyfory.serializer")
+        DataClassSerializer = getattr(serializer, "DataClassSerializer", None)
+    except Exception:  # pragma: no cover
+        DataClassSerializer = None
+    if DataClassSerializer is not None and _LenientDataClassSerializer is None:
+
+        class _LenientDataClassSerializer(DataClassSerializer):
+            """Dataclass serializer that ignores schema-hash mismatches in non-compatible mode.
+
+            This is only used as a targeted fallback for legacy Beaver internal types (Twin/LiveVar)
+            when payloads were produced by older runtimes whose pyfory schema hash differs.
+            """
+
+            def _read_header(self, buffer):
+                if not self.fory.compatible:
+                    # Legacy/non-compatible payloads write an int32 schema hash first.
+                    # We intentionally ignore it and continue reading fields in the current schema order.
+                    buffer.read_int32()
+                    return len(self._field_names)
+                return super()._read_header(buffer)
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                # Force using the Python implementation (not the JIT-generated read method),
+                # so our overridden _read_header takes effect.
+                self.read = lambda buffer: DataClassSerializer.read(  # type: ignore[method-assign]
+                    self, buffer
+                )
+
+        _LenientDataClassSerializer = _LenientDataClassSerializer
+    return pyfory
 
 
 class SecurityError(Exception):
     """Raised when a security policy violation is detected."""
-
-
-try:  # pragma: no cover
-    from pyfory.serializer import DataClassSerializer
-except Exception:  # pragma: no cover
-    DataClassSerializer = None  # type: ignore[assignment]
-
-
-if DataClassSerializer is not None:
-
-    class _LenientDataClassSerializer(DataClassSerializer):
-        """Dataclass serializer that ignores schema-hash mismatches in non-compatible mode.
-
-        This is only used as a targeted fallback for legacy Beaver internal types (Twin/LiveVar)
-        when payloads were produced by older runtimes whose pyfory schema hash differs.
-        """
-
-        def _read_header(self, buffer):
-            if not self.fory.compatible:
-                # Legacy/non-compatible payloads write an int32 schema hash first.
-                # We intentionally ignore it and continue reading fields in the current schema order.
-                buffer.read_int32()
-                return len(self._field_names)
-            return super()._read_header(buffer)
-
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            # Force using the Python implementation (not the JIT-generated read method),
-            # so our overridden _read_header takes effect.
-            self.read = lambda buffer: DataClassSerializer.read(self, buffer)  # type: ignore[method-assign]
 
 
 if TYPE_CHECKING:
@@ -601,8 +614,19 @@ def _exec_restricted_loader(src: str, scope: dict) -> dict:
         raise SecurityError(f"RestrictedPython not available: {e}") from e
 
     bytecode = compile_restricted(src, filename="<trusted_loader>", mode="exec")
+    # Extend safe_builtins with common exception types needed by loaders
+    extended_builtins = dict(safe_builtins)
+    extended_builtins.update(
+        {
+            "ImportError": ImportError,
+            "TypeError": TypeError,
+            "ValueError": ValueError,
+            "RuntimeError": RuntimeError,
+            "Exception": Exception,
+        }
+    )
     restricted_globals: dict = {
-        "__builtins__": safe_builtins,
+        "__builtins__": extended_builtins,
         "_getattr_": safer_getattr,
         "_getitem_": default_guarded_getitem,
         "_getiter_": default_guarded_getiter,
@@ -908,6 +932,7 @@ def pack(
         backend: Optional SyftBoxBackend for encrypted artifact writes
         recipients: Optional list of recipient emails for encryption
     """
+    _ensure_pyfory()
     # Prepare for sending (optionally strip private data)
     obj_to_send = _prepare_for_sending(
         obj,
@@ -1060,6 +1085,7 @@ def unpack(
         backend: Optional SyftBoxBackend for reading encrypted artifact files
         trust_loader: If True, run loader in trusted mode. If None, prompt on failure.
     """
+    _ensure_pyfory()
     _install_builtin_aliases()
     effective_policy: BeaverPolicy = _select_policy(policy, trust_loader=bool(trust_loader))
 
@@ -1088,6 +1114,7 @@ def unpack(
     def _loads_with(
         *, compatible: bool, field_nullable: bool, lenient_internal_hash: bool = False
     ) -> Any:
+        _ensure_pyfory()
         f = pyfory.Fory(
             xlang=False,
             ref=True,
@@ -1500,6 +1527,12 @@ def _resolve_trusted_loader(
                 "type": type,
                 "isinstance": isinstance,
                 "print": print,
+                # Exception types needed by loaders
+                "ImportError": ImportError,
+                "TypeError": TypeError,
+                "ValueError": ValueError,
+                "RuntimeError": RuntimeError,
+                "Exception": Exception,
                 "Path": Path,
                 "__import__": _guarded_import,
                 "globals": lambda: scope,
@@ -2173,6 +2206,7 @@ def save(
     policy=None,
 ) -> Path:
     """Capture a namespace to a specific .beaver file path."""
+    _ensure_pyfory()
     ns = globals_ns if globals_ns is not None else globals()
     payload = _filtered_namespace(ns, include_private=include_private)
     fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
@@ -2219,6 +2253,7 @@ def snapshot(
     policy=None,
 ) -> Path:
     """Capture the current namespace to an auto-named .beaver file."""
+    _ensure_pyfory()
     ns = globals_ns if globals_ns is not None else globals()
     payload = _filtered_namespace(ns, include_private=include_private)
     fory = pyfory.Fory(xlang=False, ref=True, strict=strict, policy=policy)
@@ -3293,6 +3328,10 @@ class BeaverContext:
             peer = session_config.get("peer")
             role = session_config.get("role", "accepter")
             status = session_config.get("status", "active")
+
+        # Check BEAVER_PEER env var if not set from session config
+        if not peer:
+            peer = os.environ.get("BEAVER_PEER")
 
         # If we don't have peer info, try to find it from RPC files
         if not peer and self._backend:

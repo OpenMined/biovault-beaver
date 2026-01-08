@@ -7,8 +7,12 @@ ENV_DIR="$ROOT_DIR/.test-notebooks"
 INTERACTIVE=0
 RUN_ALL=0
 CONFIG_PATH=""
+UV_CACHE_DIR="${UV_CACHE_DIR:-$ROOT_DIR/.uv-cache}"
 
-REQUIREMENTS=(papermill jupyter nbconvert ipykernel anndata matplotlib scikit-misc pyarrow torch torchvision safetensors sdv)
+mkdir -p "$UV_CACHE_DIR"
+export UV_CACHE_DIR
+
+REQUIREMENTS=(papermill jupyter nbconvert ipykernel anndata matplotlib scikit-misc pyarrow torch torchvision safetensors sdv xgboost keras seaborn)
 
 # Override versions via env vars (e.g., for Intel Mac compatibility)
 if [[ -n "${TORCH_VERSION:-}" ]]; then
@@ -140,19 +144,8 @@ done <<< "$RUN_LINES"
 RUN_COUNT=${#ROLES[@]}
 
 echo "Setting up environment..."
-uv venv --quiet --allow-existing "$ENV_DIR"
-
-# On macOS Intel, install deps one-by-one for debugging
-if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
-    echo "macOS Intel: Installing dependencies one-by-one..."
-    for pkg in "${REQUIREMENTS[@]}"; do
-        echo "  Installing $pkg..."
-        uv pip install -p "$ENV_DIR/bin/python" "$pkg"
-    done
-else
-    uv pip install --quiet -p "$ENV_DIR/bin/python" "${REQUIREMENTS[@]}"
-fi
-
+uv venv --quiet --allow-existing --python 3.12 "$ENV_DIR"
+uv pip install --quiet -p "$ENV_DIR/bin/python" "${REQUIREMENTS[@]}"
 uv pip install --quiet -p "$ENV_DIR/bin/python" -e "$ROOT_DIR/python"
 
 # Force install pyfory x86_64 wheel on macOS Intel (universal wheel doesn't work)
@@ -225,6 +218,7 @@ run_notebook() {
         "BEAVER_LOCAL_SHARED=1"
         "BEAVER_SESSION_ID=$SESSION_ID"
         "BEAVER_USER=$email"
+        "BEAVER_SKIP_PIP_INSTALL=1"
     )
 
     if [[ "$INTERACTIVE" == "1" ]]; then

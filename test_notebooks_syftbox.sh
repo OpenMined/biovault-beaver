@@ -6,6 +6,10 @@ SANDBOX_ROOT="$ROOT_DIR/sandbox"
 ENV_DIR="$ROOT_DIR/.test-notebooks"
 SYFTBOX_DIR="$ROOT_DIR/syftbox"
 GO_CACHE_DIR="$SYFTBOX_DIR/.gocache"
+UV_CACHE_DIR="${UV_CACHE_DIR:-$ROOT_DIR/.uv-cache}"
+
+mkdir -p "$UV_CACHE_DIR"
+export UV_CACHE_DIR
 
 INTERACTIVE=0
 RUN_ALL=0
@@ -17,7 +21,7 @@ KEEP_ALIVE=0
 DEFAULT_CLIENT1="${CLIENT1_EMAIL:-client1@sandbox.local}"
 DEFAULT_CLIENT2="${CLIENT2_EMAIL:-client2@sandbox.local}"
 
-REQUIREMENTS=(papermill jupyter nbconvert ipykernel scanpy anndata matplotlib scikit-misc pyarrow torch torchvision safetensors sdv)
+REQUIREMENTS=(papermill jupyter nbconvert ipykernel scanpy anndata matplotlib scikit-misc pyarrow torch torchvision safetensors sdv xgboost keras seaborn)
 
 # Override versions via env vars (e.g., for Intel Mac compatibility)
 if [[ -n "${TORCH_VERSION:-}" ]]; then
@@ -307,7 +311,7 @@ if [[ "$RUN_ALL" == "1" ]]; then
     info "All clients needed: ${ALL_CLIENTS[*]}"
 
     info "Setting up Python environment..."
-    uv venv --quiet --allow-existing "$ENV_DIR"
+    uv venv --quiet --allow-existing --python 3.12 "$ENV_DIR"
     uv pip install --quiet -p "$ENV_DIR/bin/python" "${REQUIREMENTS[@]}"
 
     SYFTBOX_SDK_PYTHON="$ROOT_DIR/syftbox-sdk/python"
@@ -385,7 +389,7 @@ fi
 info "Clients from config: ${CONFIG_CLIENTS[*]}"
 
 info "Setting up Python environment..."
-uv venv --quiet --allow-existing "$ENV_DIR"
+uv venv --quiet --allow-existing --python 3.12 "$ENV_DIR"
 uv pip install --quiet -p "$ENV_DIR/bin/python" "${REQUIREMENTS[@]}"
 
 SYFTBOX_SDK_PYTHON="$ROOT_DIR/syftbox-sdk/python"
@@ -507,6 +511,7 @@ EOF
         "BEAVER_SESSION_ID=$SESSION_ID"
         "BEAVER_USER=$email"
         "BEAVER_AUTO_ACCEPT=1"
+        "BEAVER_SKIP_PIP_INSTALL=1"
     )
 
     if [[ "$INTERACTIVE" == "1" ]]; then

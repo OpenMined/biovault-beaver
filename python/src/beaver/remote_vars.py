@@ -1583,6 +1583,13 @@ class RemoteVarPointer:
                         policy=policy,
                         trust_loader=trust_loader,
                     )
+                    # Debug: show what type was returned
+                    import beaver
+
+                    if getattr(beaver, "debug", False):
+                        print(f"[DEBUG] env.load() returned type: {type(twin).__name__}")
+                        if twin is not None:
+                            print(f"[DEBUG] twin attrs: {dir(twin)[:10]}...")
                     if hasattr(twin, "public"):
                         twin.public = _ensure_sparse_shapes(twin.public)
                         # Swap public for a safe display proxy, keep raw on the side
@@ -1618,8 +1625,17 @@ class RemoteVarPointer:
                     or "wait for sync" in exc_str
                     or "may need to wait" in exc_str
                 )
+                # Debug: print all exceptions to diagnose infinite loops
+                import beaver
+
+                if getattr(beaver, "debug", False):
+                    import traceback
+
+                    print(f"[DEBUG] _auto_load_twin exception (transient={is_transient}): {exc}")
+                    traceback.print_exc()
                 if not is_transient:
                     self._last_error = exc
+                    print(f"⚠️  Error loading Twin: {exc}")
                 # Fall through to inbox check
                 pass
 

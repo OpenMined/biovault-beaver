@@ -19,6 +19,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
+    "blake3>=0.3.0",
     "pyyaml>=6.0",
     "pyfory==0.13.2",
     "numpy",

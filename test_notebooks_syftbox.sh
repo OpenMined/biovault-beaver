@@ -512,6 +512,8 @@ EOF
         "BEAVER_USER=$email"
         "BEAVER_AUTO_ACCEPT=1"
         "BEAVER_SKIP_PIP_INSTALL=1"
+        "VIRTUAL_ENV=$ENV_DIR"
+        "PATH=$ENV_DIR/bin:$PATH"
     )
 
     if [[ "$INTERACTIVE" == "1" ]]; then

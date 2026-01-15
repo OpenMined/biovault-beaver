@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: ./dev.sh [--clients email1,email2] [--sandbox DIR] [--reset] [--stop] [--status] [--no-jupyter]
+Usage: ./dev.sh [--clients email1,email2] [--sandbox DIR] [--reset] [--stop] [--status] [--no-jupyter] [--random-ports|--no-random-ports]
 
 Starts a SyftBox devstack using the sbdev helper (syftbox submodule), prepares
 client workspaces, installs Python deps, and launches Jupyter for each client.
@@ -15,6 +15,8 @@ Options:
   --stop           Stop the devstack and exit (honors --reset for cleanup)
   --status         Print devstack state (relay/state.json) and exit
   --no-jupyter     Do not launch Jupyter (stack + setup only)
+  --random-ports   Let the devstack pick free ports (default)
+  --no-random-ports Use fixed ports for the sandbox
   -h, --help       Show this message
 EOF
 }
@@ -29,6 +31,7 @@ GO_CACHE_DIR="$SYFTBOX_DIR/.gocache"
 ACTION="start"
 RESET_FLAG=0
 START_JUPYTER=1
+RANDOM_PORTS=1
 RAW_CLIENTS=()
 
 while [[ $# -gt 0 ]]; do
@@ -54,6 +57,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-jupyter)
       START_JUPYTER=0
+      ;;
+    --random-ports)
+      RANDOM_PORTS=1
+      ;;
+    --no-random-ports)
+      RANDOM_PORTS=0
       ;;
     -h|--help)
       usage
@@ -211,6 +220,7 @@ start_devstack() {
   (cd "$SYFTBOX_DIR" && GOCACHE="$GO_CACHE_DIR" just sbdev-prune) || true
 
   local args=(sbdev-start --path "$SANDBOX_DIR")
+  (( RANDOM_PORTS )) && args+=(--random-ports)
   (( RESET_FLAG )) && args+=(--reset)
   for email in "${CLIENTS[@]}"; do
     args+=(--client "$email")
@@ -260,11 +270,23 @@ load_stack_info() {
 import json, sys
 path = sys.argv[1]
 data = json.load(open(path))
-print(f"server_port={data['Server']['Port']}")
-print(f"minio_api={data['Minio']['APIPort']}")
-print(f"minio_console={data['Minio']['ConsolePort']}")
-for client in data.get("Clients", []):
-    print(f"client={client['Email']}|{client['Port']}")
+server = data.get("server") or data.get("Server") or {}
+server_port = server.get("port") or server.get("Port")
+if server_port:
+    print(f"server_port={server_port}")
+minio = data.get("minio") or data.get("Minio") or {}
+minio_api = minio.get("api_port") or minio.get("APIPort")
+minio_console = minio.get("console_port") or minio.get("ConsolePort")
+if minio_api:
+    print(f"minio_api={minio_api}")
+if minio_console:
+    print(f"minio_console={minio_console}")
+clients = data.get("clients") or data.get("Clients") or []
+for client in clients:
+    email = client.get("email") or client.get("Email")
+    port = client.get("port") or client.get("Port")
+    if email and port:
+        print(f"client={email}|{port}")
 PY
 )"; then
     echo "Warning: unable to read devstack state at $STACK_STATE_FILE" >&2

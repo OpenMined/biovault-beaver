@@ -1,0 +1,17 @@
+{
+	"mode": "parallel",
+	"runs": [
+		{
+			"role": "do",
+			"notebook": "notebooks/07-single-cell-umap-do.ipynb",
+			"timeout": 600,
+			"email": "client1@sandbox.local"
+		},
+		{
+			"role": "ds",
+			"notebook": "notebooks/07-single-cell-umap-ds.ipynb",
+			"timeout": 600,
+			"email": "client2@sandbox.local"
+		}
+	]
+}

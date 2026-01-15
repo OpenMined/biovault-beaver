@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 import tempfile
 import types
@@ -20,7 +22,12 @@ try:
 except ImportError:
     _HAS_REQUESTS = False
 
-DEFAULT_CACHE_DIR = Path.home() / ".biovault" / "cache" / "beaver" / "sample-data"
+_ENV_CACHE_DIR = os.environ.get("BEAVER_SAMPLE_DATA_DIR")
+DEFAULT_CACHE_DIR = (
+    Path(_ENV_CACHE_DIR).expanduser()
+    if _ENV_CACHE_DIR
+    else Path.home() / ".biovault" / "cache" / "beaver" / "sample-data"
+)
 
 BASE_URL = "https://raw.githubusercontent.com/OpenMined/biovault-data/main"
 
@@ -57,9 +64,43 @@ class DatasetPart:
         if self._manifest is not None:
             return self._manifest
 
+        cached_path = DEFAULT_CACHE_DIR / self.name / self._guess_original_filename()
+        cached_manifest = self._load_cached_manifest(cached_path)
         url = _convert_github_url(self.yaml_url)
-        self._manifest = _fetch_with_retry(url, is_yaml=True)
-        return self._manifest
+        try:
+            self._manifest = _fetch_with_retry(url, is_yaml=True)
+            return self._manifest
+        except Exception:
+            if cached_manifest is not None:
+                self._manifest = cached_manifest
+                return self._manifest
+            raise
+
+    def _guess_original_filename(self) -> str:
+        url_path = urllib.parse.urlparse(self.yaml_url).path
+        name = Path(urllib.parse.unquote(url_path)).name
+        if name.endswith(".yaml"):
+            return name[:-5]
+        if name.endswith(".yml"):
+            return name[:-4]
+        return name
+
+    @staticmethod
+    def _manifest_cache_path(output_path: Path) -> Path:
+        return output_path.with_name(f"{output_path.name}.manifest.json")
+
+    def _load_cached_manifest(self, output_path: Path) -> Optional[dict]:
+        manifest_path = self._manifest_cache_path(output_path)
+        if not manifest_path.exists():
+            return None
+        try:
+            return json.loads(manifest_path.read_text())
+        except Exception:
+            return None
+
+    def _write_cached_manifest(self, output_path: Path, manifest: dict) -> None:
+        manifest_path = self._manifest_cache_path(output_path)
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
 
     def info(self) -> None:
         """Print detailed manifest information."""
@@ -83,11 +124,53 @@ class DatasetPart:
         Returns:
             Path to the downloaded file.
         """
-        manifest = self._fetch_manifest()
-        original_filename = manifest["file"]["original"]
-
+        cache_dir: Optional[Path] = None
+        guess_filename = self._guess_original_filename()
         if path is None:
             cache_dir = DEFAULT_CACHE_DIR / self.name
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            output_guess = cache_dir / guess_filename
+        elif path.is_dir():
+            output_guess = path / guess_filename
+        else:
+            output_guess = path
+
+        output_guess.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            manifest = self._fetch_manifest()
+        except Exception:
+            if output_guess.exists():
+                cached_manifest = self._load_cached_manifest(output_guess)
+                if cached_manifest is not None:
+                    self._manifest = cached_manifest
+                    if verbose:
+                        print(f"⚠️  Failed to reach manifest; using cached data: {output_guess}")
+                    try:
+                        actual_hash = _compute_blake3(output_guess)
+                        if actual_hash == cached_manifest["file"]["original_b3sum"]:
+                            return output_guess
+                        if verbose:
+                            print("  Cached checksum mismatch, cannot use offline copy.")
+                    except Exception:
+                        if verbose:
+                            print("  Could not verify cached checksum, cannot use offline copy.")
+                else:
+                    try:
+                        if output_guess.stat().st_size == self.size_bytes:
+                            if verbose:
+                                print(
+                                    "⚠️  Failed to reach manifest; using cached data: "
+                                    f"{output_guess}"
+                                )
+                            return output_guess
+                    except OSError:
+                        pass
+            raise
+
+        original_filename = manifest["file"]["original"]
+        if path is None:
+            cache_dir = cache_dir or (DEFAULT_CACHE_DIR / self.name)
             cache_dir.mkdir(parents=True, exist_ok=True)
             output_path = cache_dir / original_filename
         elif path.is_dir():
@@ -97,7 +180,6 @@ class DatasetPart:
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Check if already downloaded and valid
         if output_path.exists():
             if verbose:
                 print(f"✓ Already downloaded: {output_path}")
@@ -110,9 +192,32 @@ class DatasetPart:
             except Exception:
                 if verbose:
                     print("  Could not verify checksum, re-downloading...")
+        elif output_guess.exists() and output_guess != output_path:
+            if verbose:
+                print(f"✓ Already downloaded: {output_guess}")
+            try:
+                actual_hash = _compute_blake3(output_guess)
+                if actual_hash == manifest["file"]["original_b3sum"]:
+                    try:
+                        self._write_cached_manifest(output_guess, manifest)
+                    except Exception:
+                        if verbose:
+                            print("  ⚠️  Failed to write manifest cache (continuing)")
+                    return output_guess
+                if verbose:
+                    print("  Checksum mismatch, re-downloading...")
+            except Exception:
+                if verbose:
+                    print("  Could not verify checksum, re-downloading...")
 
         # Download
-        return _download_from_manifest(manifest, self.yaml_url, output_path, verbose)
+        output_path = _download_from_manifest(manifest, self.yaml_url, output_path, verbose)
+        try:
+            self._write_cached_manifest(output_path, manifest)
+        except Exception:
+            if verbose:
+                print("  ⚠️  Failed to write manifest cache (continuing)")
+        return output_path
 
 
 @dataclass

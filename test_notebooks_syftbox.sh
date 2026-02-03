@@ -225,6 +225,21 @@ print("anndata", ad.__version__)
 print("numpy", np.__version__)
 print("pandas string_storage", pd.options.mode.string_storage)
 PY
+
+    info "pip list (env=$PYTHON):"
+    if command -v uv >/dev/null 2>&1; then
+        uv pip list -p "$PYTHON" --format=freeze || true
+    else
+        "$PYTHON" -m pip list || true
+    fi
+
+    info "importlib.metadata packages (env=$PYTHON):"
+    "$PYTHON" - <<'PY'
+import importlib.metadata as md
+pkgs = sorted((d.metadata["Name"], d.version) for d in md.distributions())
+for name, ver in pkgs:
+    print(f"{name}=={ver}")
+PY
 }
 
 import_peer_bundles() {

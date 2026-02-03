@@ -1,5 +1,7 @@
 """Lightweight notebook-to-notebook ferry for Python objects using Fory."""
 
+import os
+
 from .computation import (
     ComputationRequest,
     ComputationResult,
@@ -49,6 +51,12 @@ from .twin_result import TwinComputationResult
 # Also controls SyftBox SDK debug output when using SyftBoxBackend
 _debug_enabled = False
 
+# Default-off: prevent noisy SyftBox crypto debug unless explicitly allowed.
+if os.environ.get("SYFTBOX_DEBUG_CRYPTO") and not os.environ.get(
+    "BEAVER_ALLOW_SYFTBOX_DEBUG_CRYPTO"
+):
+    os.environ.pop("SYFTBOX_DEBUG_CRYPTO", None)
+
 
 def __getattr__(name: str):
     """
@@ -70,6 +78,8 @@ def set_debug(enabled: bool = True) -> None:
     """Enable or disable debug mode."""
     global _debug_enabled
     _debug_enabled = enabled
+    # Keep module-level alias in sync for callers that reference beaver.debug.
+    globals()["debug"] = _debug_enabled
 
 
 def get_debug() -> bool:

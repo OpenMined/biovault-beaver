@@ -297,47 +297,6 @@ def _register_anndata(obj: Any, trusted_loader_cls: type[Any], obj_type: type[An
 
     @trusted_loader_cls.register(obj_type, name=name)
     def annadata_serialize_file(adata: Any, path: Path) -> None:
-        try:
-            import pandas as pd  # type: ignore
-
-            def _coerce_string_storage(df: pd.DataFrame) -> pd.DataFrame:
-                df = df.copy()
-
-                def _needs_python_string(series: pd.Series) -> bool:
-                    try:
-                        dtype = series.dtype
-                        if isinstance(dtype, pd.StringDtype):
-                            return getattr(dtype, "storage", None) == "pyarrow"
-                        if hasattr(pd.arrays, "ArrowStringArray") and isinstance(
-                            series.array, pd.arrays.ArrowStringArray
-                        ):
-                            return True
-                    except Exception:
-                        return False
-                    return False
-
-                for col in df.columns:
-                    if _needs_python_string(df[col]):
-                        df[col] = df[col].astype("string[python]")
-
-                try:
-                    idx_dtype = df.index.dtype
-                    if isinstance(idx_dtype, pd.StringDtype) and getattr(idx_dtype, "storage", None) == "pyarrow":
-                        df.index = df.index.astype("string[python]")
-                except Exception:
-                    pass
-
-                return df
-
-            # CI can enable pyarrow-backed pandas strings, which anndata cannot
-            # write to h5ad. Coerce to python-backed strings to keep serialization
-            # stable across environments.
-            adata = adata.copy()
-            adata.obs = _coerce_string_storage(adata.obs)
-            adata.var = _coerce_string_storage(adata.var)
-        except Exception:
-            pass
-
         adata.write_h5ad(path)
 
     @trusted_loader_cls.register(obj_type, name=name)

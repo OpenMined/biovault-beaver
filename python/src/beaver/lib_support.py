@@ -300,10 +300,10 @@ def _register_anndata(obj: Any, trusted_loader_cls: type[Any], obj_type: type[An
         try:
             import pandas as pd  # type: ignore
 
-            def _coerce_string_storage(df: "pd.DataFrame") -> "pd.DataFrame":
+            def _coerce_string_storage(df: pd.DataFrame) -> pd.DataFrame:
                 df = df.copy()
 
-                def _needs_python_string(series: "pd.Series") -> bool:
+                def _needs_python_string(series: pd.Series) -> bool:
                     try:
                         dtype = series.dtype
                         if isinstance(dtype, pd.StringDtype):

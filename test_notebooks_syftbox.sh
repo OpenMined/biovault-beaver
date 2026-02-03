@@ -205,6 +205,28 @@ write_subscriptions() {
     info "✓ Subscriptions configured"
 }
 
+print_env_versions() {
+    info "Python/Lib versions (env=$PYTHON):"
+    "$PYTHON" - <<'PY'
+import sys
+import pandas as pd
+try:
+    import pyarrow
+    pyarrow_ver = pyarrow.__version__
+except Exception as exc:
+    pyarrow_ver = f"not installed ({exc})"
+import anndata as ad
+import numpy as np
+
+print("python", sys.version.replace("\n", " "))
+print("pandas", pd.__version__)
+print("pyarrow", pyarrow_ver)
+print("anndata", ad.__version__)
+print("numpy", np.__version__)
+print("pandas string_storage", pd.options.mode.string_storage)
+PY
+}
+
 import_peer_bundles() {
     local clients=("$@")
 
@@ -379,6 +401,8 @@ if [[ "$RUN_ALL" == "1" ]]; then
 
     PYTHON="$ENV_DIR/bin/python"
 
+    print_env_versions
+
     start_devstack "${ALL_CLIENTS[@]}"
     provision_keys "${ALL_CLIENTS[@]}"
     write_subscriptions "${ALL_CLIENTS[@]}"
@@ -457,6 +481,8 @@ if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
 fi
 
 PYTHON="$ENV_DIR/bin/python"
+
+print_env_versions
 
 if [[ "$RESET_FLAG" == "1" ]] || [[ ! -f "$SANDBOX_ROOT/relay/state.json" ]]; then
     start_devstack "${CONFIG_CLIENTS[@]}"

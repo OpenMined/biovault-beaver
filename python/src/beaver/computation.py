@@ -6,6 +6,7 @@ import ast
 import builtins
 import inspect
 import io
+import os
 from contextlib import redirect_stderr, redirect_stdout, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1495,6 +1496,7 @@ class ComputationRequest:
         stderr_capture = io.StringIO()
         captured_figures = []
         captured_fig_ids = set()
+        keep_fig_obj = os.getenv("BEAVER_CAPTURE_FIGURE_OBJECTS", "1") == "1"
 
         def _capture_figure(fig):
             """Save a matplotlib figure to PNG once per figure id."""
@@ -1511,7 +1513,7 @@ class ComputationRequest:
                 captured_figures.append(
                     CapturedFigure(
                         {
-                            "figure": None,
+                            "figure": fig if keep_fig_obj else None,
                             "png_bytes": buf.getvalue(),
                         }
                     )
@@ -1894,7 +1896,7 @@ class ComputationRequest:
                             captured_figures.append(
                                 CapturedFigure(
                                     {
-                                        "figure": None,  # Don't keep reference to avoid issues
+                                        "figure": fig,
                                         "png_bytes": buf.getvalue(),
                                     }
                                 )

@@ -2541,7 +2541,7 @@ def export(
                                     captured_figures.append(
                                         CapturedFigure(
                                             {
-                                                "figure": None,
+                                                "figure": fig,
                                                 "png_bytes": buf.getvalue(),
                                             }
                                         )

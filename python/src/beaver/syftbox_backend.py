@@ -130,7 +130,7 @@ class SyftBoxBackend:
             root=str(datasites_root),
             vault_path=str(self.vault_path) if not disable_crypto else None,
             disable_crypto=disable_crypto,
-            debug=beaver.debug,
+            debug=beaver.get_debug(),
         )
 
         # Initialize SyftBox app structure for biovault

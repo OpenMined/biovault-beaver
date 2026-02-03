@@ -650,10 +650,10 @@ single_cell = SampleDataset(
     mock=DatasetPart(
         name="single_cell",
         kind="mock",
-        yaml_url=f"{BASE_URL}/single_cell/sample1/sc_RNAseq_adata_downsampled_to5percent.mock.h5ad.yaml",
+        yaml_url=f"{BASE_URL}/single_cell/sample1/sc_RNAseq_adata_downsampled_to5percent.mock.5k.h5ad.yaml",
         description="Synthetic mock scRNA-seq data for development",
-        size_bytes=989931899,
-        compressed_size_bytes=227488482,
+        size_bytes=131563411,
+        compressed_size_bytes=34244379,
         file_format="h5ad",
     ),
     real=DatasetPart(

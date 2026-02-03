@@ -8,7 +8,6 @@ on:
 
 jobs:
   lint:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +24,6 @@ jobs:
         run: ./lint.sh --check
 
   test:
-    if: false
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -52,7 +50,6 @@ jobs:
         run: bash test.sh
 
   lib-support:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,7 +66,6 @@ jobs:
         run: bash test_libs.sh
 
   security:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -91,7 +87,6 @@ jobs:
         run: bash test_security.sh
 
   notebook-01-hello-beaver:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -110,7 +105,6 @@ jobs:
         run: ./test_notebooks.sh notebooks/01-hello-beaver.json
 
   notebook-02-advanced-features:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -129,7 +123,6 @@ jobs:
         run: ./test_notebooks.sh notebooks/02-advanced-features.json
 
   notebook-03-neural-network:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -151,7 +144,6 @@ jobs:
         run: ./test_notebooks.sh notebooks/03-neural-network.json
 
   notebook-00-malicious:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -170,7 +162,6 @@ jobs:
         run: ./test_notebooks.sh notebooks/00-malicious.json
 
   macos-intel-3-12:
-    if: false
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
@@ -193,7 +184,6 @@ jobs:
         run: bash test_libs.sh
 
   macos-intel-notebook-01-hello-beaver:
-    if: false
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
@@ -215,7 +205,6 @@ jobs:
         run: ./test_notebooks.sh notebooks/01-hello-beaver.json
 
   macos-intel-notebook-02-advanced-features:
-    if: false
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
@@ -237,7 +226,6 @@ jobs:
         run: ./test_notebooks.sh notebooks/02-advanced-features.json
 
   macos-intel-notebook-03-neural-network:
-    if: false
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
@@ -260,7 +248,6 @@ jobs:
 
   # SyftBox stack integration tests (real server + syncing clients)
   syftbox-notebook-01-hello-beaver:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -295,7 +282,6 @@ jobs:
         run: ./test_notebooks_syftbox.sh notebooks/01-hello-beaver.json
 
   syftbox-notebook-02-advanced-features:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -330,7 +316,6 @@ jobs:
         run: ./test_notebooks_syftbox.sh notebooks/02-advanced-features.json
 
   syftbox-notebook-03-neural-network:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -368,7 +353,6 @@ jobs:
         run: ./test_notebooks_syftbox.sh notebooks/03-neural-network.json
 
   syftbox-notebook-00-malicious:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -403,7 +387,6 @@ jobs:
         run: ./test_notebooks_syftbox.sh notebooks/00-malicious.json
 
   syftbox-notebook-04-sessions:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -438,7 +421,6 @@ jobs:
         run: ./test_notebooks_syftbox.sh notebooks/04-sessions.json
 
   syftbox-notebook-06-ecg:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

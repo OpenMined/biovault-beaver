@@ -160,6 +160,51 @@ PY
     info "✓ All keys provisioned"
 }
 
+write_subscriptions() {
+    local clients=("$@")
+
+    if [[ ${#clients[@]} -lt 2 ]]; then
+        info "Single client mode, skipping subscription setup"
+        return 0
+    fi
+
+    info "Configuring subscriptions for peer datasites..."
+
+    for my_email in "${clients[@]}"; do
+        local my_dir="$SANDBOX_ROOT/$my_email"
+        local sub_path="$my_dir/.data/syft.sub.yaml"
+
+        mkdir -p "$(dirname "$sub_path")"
+
+        {
+            echo "version: 1"
+            echo "defaults:"
+            echo "  action: block"
+            echo "rules:"
+            for peer_email in "${clients[@]}"; do
+                if [[ "$my_email" != "$peer_email" ]]; then
+                    echo "  - action: allow"
+                    echo "    datasite: \"$peer_email\""
+                    echo "    path: \"public/**\""
+                    echo "  - action: allow"
+                    echo "    datasite: \"$peer_email\""
+                    echo "    path: \"datasets/**\""
+                    echo "  - action: allow"
+                    echo "    datasite: \"$peer_email\""
+                    echo "    path: \"app_data/biovault/rpc/**\""
+                    echo "  - action: allow"
+                    echo "    datasite: \"$peer_email\""
+                    echo "    path: \"shared/biovault/sessions/**\""
+                fi
+            done
+        } > "$sub_path"
+
+        chmod 600 "$sub_path" || true
+    done
+
+    info "✓ Subscriptions configured"
+}
+
 import_peer_bundles() {
     local clients=("$@")
 
@@ -336,6 +381,7 @@ if [[ "$RUN_ALL" == "1" ]]; then
 
     start_devstack "${ALL_CLIENTS[@]}"
     provision_keys "${ALL_CLIENTS[@]}"
+    write_subscriptions "${ALL_CLIENTS[@]}"
     wait_for_peer_sync "${ALL_CLIENTS[@]}"
     import_peer_bundles "${ALL_CLIENTS[@]}"
 
@@ -417,6 +463,7 @@ if [[ "$RESET_FLAG" == "1" ]] || [[ ! -f "$SANDBOX_ROOT/relay/state.json" ]]; th
 fi
 
 provision_keys "${CONFIG_CLIENTS[@]}"
+write_subscriptions "${CONFIG_CLIENTS[@]}"
 
 if [[ "$SKIP_SYNC_CHECK" != "1" ]]; then
     wait_for_peer_sync "${CONFIG_CLIENTS[@]}"

@@ -160,6 +160,88 @@ PY
     info "✓ All keys provisioned"
 }
 
+write_subscriptions() {
+    local clients=("$@")
+
+    if [[ ${#clients[@]} -lt 2 ]]; then
+        info "Single client mode, skipping subscription setup"
+        return 0
+    fi
+
+    info "Configuring subscriptions for peer datasites..."
+
+    for my_email in "${clients[@]}"; do
+        local my_dir="$SANDBOX_ROOT/$my_email"
+        local sub_path="$my_dir/.data/syft.sub.yaml"
+
+        mkdir -p "$(dirname "$sub_path")"
+
+        {
+            echo "version: 1"
+            echo "defaults:"
+            echo "  action: block"
+            echo "rules:"
+            for peer_email in "${clients[@]}"; do
+                if [[ "$my_email" != "$peer_email" ]]; then
+                    echo "  - action: allow"
+                    echo "    datasite: \"$peer_email\""
+                    echo "    path: \"public/**\""
+                    echo "  - action: allow"
+                    echo "    datasite: \"$peer_email\""
+                    echo "    path: \"datasets/**\""
+                    echo "  - action: allow"
+                    echo "    datasite: \"$peer_email\""
+                    echo "    path: \"app_data/biovault/rpc/**\""
+                    echo "  - action: allow"
+                    echo "    datasite: \"$peer_email\""
+                    echo "    path: \"shared/biovault/sessions/**\""
+                fi
+            done
+        } > "$sub_path"
+
+        chmod 600 "$sub_path" || true
+    done
+
+    info "✓ Subscriptions configured"
+}
+
+print_env_versions() {
+    info "Python/Lib versions (env=$PYTHON):"
+    "$PYTHON" - <<'PY'
+import sys
+import pandas as pd
+try:
+    import pyarrow
+    pyarrow_ver = pyarrow.__version__
+except Exception as exc:
+    pyarrow_ver = f"not installed ({exc})"
+import anndata as ad
+import numpy as np
+
+print("python", sys.version.replace("\n", " "))
+print("pandas", pd.__version__)
+print("pyarrow", pyarrow_ver)
+print("anndata", ad.__version__)
+print("numpy", np.__version__)
+print("pandas string_storage", pd.options.mode.string_storage)
+PY
+
+    info "pip list (env=$PYTHON):"
+    if command -v uv >/dev/null 2>&1; then
+        uv pip list -p "$PYTHON" --format=freeze || true
+    else
+        "$PYTHON" -m pip list || true
+    fi
+
+    info "importlib.metadata packages (env=$PYTHON):"
+    "$PYTHON" - <<'PY'
+import importlib.metadata as md
+pkgs = sorted((d.metadata["Name"], d.version) for d in md.distributions())
+for name, ver in pkgs:
+    print(f"{name}=={ver}")
+PY
+}
+
 import_peer_bundles() {
     local clients=("$@")
 
@@ -334,8 +416,11 @@ if [[ "$RUN_ALL" == "1" ]]; then
 
     PYTHON="$ENV_DIR/bin/python"
 
+    print_env_versions
+
     start_devstack "${ALL_CLIENTS[@]}"
     provision_keys "${ALL_CLIENTS[@]}"
+    write_subscriptions "${ALL_CLIENTS[@]}"
     wait_for_peer_sync "${ALL_CLIENTS[@]}"
     import_peer_bundles "${ALL_CLIENTS[@]}"
 
@@ -412,11 +497,14 @@ fi
 
 PYTHON="$ENV_DIR/bin/python"
 
+print_env_versions
+
 if [[ "$RESET_FLAG" == "1" ]] || [[ ! -f "$SANDBOX_ROOT/relay/state.json" ]]; then
     start_devstack "${CONFIG_CLIENTS[@]}"
 fi
 
 provision_keys "${CONFIG_CLIENTS[@]}"
+write_subscriptions "${CONFIG_CLIENTS[@]}"
 
 if [[ "$SKIP_SYNC_CHECK" != "1" ]]; then
     wait_for_peer_sync "${CONFIG_CLIENTS[@]}"

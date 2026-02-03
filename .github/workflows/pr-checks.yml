@@ -257,6 +257,11 @@ jobs:
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
 
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -286,6 +291,11 @@ jobs:
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
 
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -314,6 +324,11 @@ jobs:
         run: |
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
+
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -347,6 +362,11 @@ jobs:
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
 
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -376,6 +396,11 @@ jobs:
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
 
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -404,6 +429,11 @@ jobs:
         run: |
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
+
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -436,6 +466,11 @@ jobs:
         run: |
           chmod +x scripts/setup-workspace.sh
           ./scripts/setup-workspace.sh
+
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
       - name: Set up Go
         uses: actions/setup-go@v5

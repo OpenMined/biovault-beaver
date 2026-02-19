@@ -326,7 +326,7 @@ provision_client_identity() {
   local email="$1"
   local data_dir="$2"
   local venv_python="$3"
-  local vault_path="$data_dir/.syc"
+  local vault_path="$data_dir/.sbc"
 
   echo "[$email] Provisioning SyftBox identity..."
   "$venv_python" - "$email" "$data_dir" "$vault_path" <<'PY'
@@ -389,7 +389,7 @@ prepare_client_workspace() {
 
   echo "[$email] Preparing workspace..."
   mkdir -p "$shared_dir" "$public_dir" "$session_dir" "$unencrypted_dir"
-  mkdir -p "$data_root/.syc/keys" "$data_root/.syc/bundles" "$data_root/.syc/config"
+  mkdir -p "$data_root/.sbc/keys" "$data_root/.sbc/bundles" "$data_root/.sbc/config"
 
   for peer in "${CLIENTS[@]}"; do
     [[ "$peer" == "$email" ]] && continue
@@ -465,7 +465,7 @@ EOF
     "SYFTBOX_DATA_DIR": "$client_home",
     "SYFTBOX_CONFIG_PATH": "$config_path",
     "SYFTBOX_SERVER_URL": "$SERVER_URL",
-    "SYC_VAULT": "$client_home/.syc",
+    "SBC_VAULT": "$client_home/.sbc",
     "BEAVER_SESSION_ID": "$SESSION_ID",
     "BEAVER_USER": "$email",
     "BEAVER_PEER": "$peer_email",
@@ -482,7 +482,7 @@ import_peer_bundles() {
   for i in "${!CLIENT_VENVS_EMAILS[@]}"; do
     local email="${CLIENT_VENVS_EMAILS[$i]}"
     local venv_python="${CLIENT_VENVS_PATHS[$i]}"
-    local vault_path="$SANDBOX_DIR/$email/.syc"
+    local vault_path="$SANDBOX_DIR/$email/.sbc"
     for peer in "${CLIENTS[@]}"; do
       [[ "$peer" == "$email" ]] && continue
       local bundle="$SANDBOX_DIR/$peer/datasites/$peer/public/crypto/did.json"
@@ -507,7 +507,7 @@ start_jupyter() {
   local client_home="$SANDBOX_DIR/$email"
   local venv_path="$client_home/.venv"
   local config_path="$client_home/.syftbox/config.json"
-  local vault_path="$client_home/.syc"
+  local vault_path="$client_home/.sbc"
   local peer_email
   peer_email="$(get_peer_email "$email")"
   local port
@@ -528,7 +528,7 @@ start_jupyter() {
     export SYFTBOX_DATA_DIR="$client_home"
     export SYFTBOX_CONFIG_PATH="$config_path"
     export SYFTBOX_SERVER_URL="$SERVER_URL"
-    export SYC_VAULT="$vault_path"
+    export SBC_VAULT="$vault_path"
     # Beaver session environment for shared sessions
     export BEAVER_AUTO_ACCEPT="${BEAVER_AUTO_ACCEPT:-1}"
     export BEAVER_SESSION_ID="$SESSION_ID"

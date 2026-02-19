@@ -85,9 +85,9 @@ class SyftBoxBackend:
     - Encrypted files in datasites/ (synced via SyftBox)
 
     Args:
-        data_dir: Root data directory (contains datasites/, .syc/, unencrypted/)
+        data_dir: Root data directory (contains datasites/, .sbc/, unencrypted/)
         email: User's email identity (e.g., "client1@sandbox.local")
-        vault_path: Override .syc vault location (default: data_dir/.syc)
+        vault_path: Override .sbc vault location (default: data_dir/.sbc)
         disable_crypto: Disable encryption for testing (default: False)
     """
 
@@ -119,7 +119,7 @@ class SyftBoxBackend:
         if vault_path:
             self.vault_path = Path(vault_path)
         else:
-            self.vault_path = self.data_dir / ".syc"
+            self.vault_path = self.data_dir / ".sbc"
 
         # Initialize SyftBox storage
         # The root should point to datasites/ directory
@@ -668,14 +668,14 @@ def provision_identity(
     Args:
         data_dir: Root data directory
         email: User's email identity
-        vault_path: Override .syc vault location
+        vault_path: Override .sbc vault location
 
     Returns:
         Dict with:
             - identity: str - The email identity
             - generated: bool - True if newly generated
             - recovery_mnemonic: Optional[str] - 12-word recovery phrase (only if generated)
-            - vault_path: str - Path to .syc vault
+            - vault_path: str - Path to .sbc vault
             - bundle_path: str - Path to private bundle
             - public_bundle_path: str - Path to exported public DID
     """
@@ -713,7 +713,7 @@ def import_peer_bundle(
 
     Args:
         bundle_path: Path to peer's did.json bundle
-        vault_path: Path to local .syc vault
+        vault_path: Path to local .sbc vault
         expected_identity: Expected peer email (validates bundle)
 
     Returns:

@@ -4204,8 +4204,8 @@ def connect(
 
         # SyftBox parameters (for encrypted mode):
         syftbox: Enable SyftBox backend for encrypted sync (default: True)
-        data_dir: SyftBox data directory (contains datasites/, .syc/)
-        vault_path: Override .syc vault location
+        data_dir: SyftBox data directory (contains datasites/, .sbc/)
+        vault_path: Override .sbc vault location
         disable_crypto: Disable encryption for testing (default: False)
 
     Returns:

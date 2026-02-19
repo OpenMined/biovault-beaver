@@ -546,8 +546,8 @@ def test_sender_verification_rejects_spoofed_sender(tmp_path):
     alice_data = tmp_path / "alice"
     bob_data = tmp_path / "bob"
 
-    alice_vault = alice_data / ".syc"
-    bob_vault = bob_data / ".syc"
+    alice_vault = alice_data / ".sbc"
+    bob_vault = bob_data / ".sbc"
 
     alice_datasites = alice_data / "datasites"
     bob_datasites = bob_data / "datasites"

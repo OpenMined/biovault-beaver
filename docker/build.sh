@@ -42,7 +42,7 @@ echo "Building beaver:${VERSION} for ${PLATFORMS}..."
 
 REMOTE_TAGS=( )
 if [ -n "$REMOTE_IMAGE" ]; then
-    REMOTE_TAGS=("${REMOTE_IMAGE}:${VERSION}" "${REMOTE_IMAGE}:latest" "${REMOTE_IMAGE}:0.1.49")
+    REMOTE_TAGS=("${REMOTE_IMAGE}:${VERSION}" "${REMOTE_IMAGE}:latest" "${REMOTE_IMAGE}:0.1.50")
 fi
 
 BUILD_CMD=(docker buildx build
@@ -96,7 +96,7 @@ else
     LOAD_PLATFORM_RESOLVED="$LOAD_PLATFORM"
 fi
 
-LOCAL_TAGS=("beaver:${VERSION}" "beaver:latest" "${REMOTE_IMAGE}:0.1.49")
+LOCAL_TAGS=("beaver:${VERSION}" "beaver:latest" "${REMOTE_IMAGE}:0.1.50")
 LOCAL_LOADED=0
 if [ -n "$LOAD_PLATFORM_RESOLVED" ]; then
     LOAD_CMD=(docker buildx build

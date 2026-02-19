@@ -334,7 +334,7 @@ class _FnDecorator:
 fn = _FnDecorator()
 
 
-__version__ = "0.1.49"
+__version__ = "0.1.50"
 __all__ = [
     "sample_data",
     "active_session",

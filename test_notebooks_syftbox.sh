@@ -141,7 +141,7 @@ from beaver import provision_identity
 
 data_dir = Path(sys.argv[1])
 email = sys.argv[2]
-vault_path = data_dir / ".syc"
+vault_path = data_dir / ".sbc"
 
 result = provision_identity(
     data_dir=data_dir,
@@ -254,7 +254,7 @@ import_peer_bundles() {
 
     for my_email in "${clients[@]}"; do
         local my_dir="$SANDBOX_ROOT/$my_email"
-        local my_vault="$my_dir/.syc"
+        local my_vault="$my_dir/.sbc"
 
         for peer_email in "${clients[@]}"; do
             if [[ "$my_email" != "$peer_email" ]]; then
@@ -595,7 +595,7 @@ EOF
         "SYFTBOX_EMAIL=$email"
         "SYFTBOX_DATA_DIR=$client_dir"
         "SYFTBOX_CONFIG_PATH=$config_path"
-        "SYC_VAULT=$client_dir/.syc"
+        "SBC_VAULT=$client_dir/.sbc"
         "BEAVER_SESSION_ID=$SESSION_ID"
         "BEAVER_USER=$email"
         "BEAVER_AUTO_ACCEPT=1"

@@ -51,11 +51,15 @@ from .twin_result import TwinComputationResult
 # Also controls SyftBox SDK debug output when using SyftBoxBackend
 _debug_enabled = False
 
-# Default-off: prevent noisy SyftBox crypto debug unless explicitly allowed.
-if os.environ.get("SYFTBOX_DEBUG_CRYPTO") and not os.environ.get(
-    "BEAVER_ALLOW_SYFTBOX_DEBUG_CRYPTO"
-):
-    os.environ.pop("SYFTBOX_DEBUG_CRYPTO", None)
+# Default-off: prevent noisy SyftBox/SBC debug unless explicitly allowed.
+if not os.environ.get("BEAVER_ALLOW_SYFTBOX_DEBUG_CRYPTO"):
+    for _var in (
+        "SYFTBOX_DEBUG_CRYPTO",
+        "BIOVAULT_DEV_SYFTBOX",
+        "SYFTBOX_DEBUG",
+        "BIOVAULT_DEV_MODE",
+    ):
+        os.environ.pop(_var, None)
 
 
 def __getattr__(name: str):
